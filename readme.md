@@ -2,7 +2,7 @@
 
 A zero-trust AI architecture utilizing a multi-agent system to dynamically forge local tools, featuring persistent sessions, WSL2 isolation, GPU acceleration, and auto-healing debugging loops.
 
-Rather than relying on a static set of pre-programmed tools, this framework empowers an AI to write, debug, and execute its own Python tools on the fly using the Model Context Protocol (MCP). By separating the "Brain" (logical reasoning) from the "Coder" (code generation) and the "Summarizer" (memory management), the system acts as a persistent, self-expanding AI operating system capable of acting as an autonomous researcher—scraping the web, downloading massive datasets, testing hypotheses, training machine learning models, and rendering publication-ready reports while safely bridging massive LLMs with your local hardware.
+Rather than relying on a static set of pre-programmed tools, this framework empowers an AI to write, debug, and execute its own Python tools on the fly using the Model Context Protocol (MCP). By separating the "Brain" (logical reasoning) from the "Coder" (code generation), the "Summarizer" (memory management), and the "Adviser" (strategic correction), the system acts as a persistent, self-expanding AI operating system capable of acting as an autonomous researcher—scraping the web, downloading massive datasets, testing hypotheses, training machine learning models, and rendering publication-ready reports while safely bridging massive LLMs with your local hardware.
 
 ---
 
@@ -52,9 +52,11 @@ You will now automatically be logged in as the restricted `agent` user, trapped 
 
 ### 1. The Multi-Agent Architecture
 This project utilizes multiple distinct Large Language Models (LLMs) to maximize efficiency and accuracy:
-* **The Brain (The Overseer):** A high-parameter reasoning model (e.g., Qwen 397B). It communicates with the user, plans out the necessary steps, and orchestrates the execution of tools.
+* **The Brain (The Overseer):** A fast, high-parameter reasoning model. It communicates with the user, plans out the necessary steps, and orchestrates the execution of tools.
 * **The Coder (The Hands):** A specialized coding model operating inside the Forge sandbox. It operates invisibly in the background. When the Brain needs a new tool, the Coder writes the Python script, validates its syntax, and saves it.
-* **The Summarizer (The Memory Manager):** A background agent responsible for context compression. When triggered, it silently extracts facts into long-term memory, shrinks the bloated chat history, and injects a "Next Steps" to-do list so the Brain never loses its train of thought.
+* **The Summarizer (The Memory Manager):** A background agent responsible for context compression using strict JSON schemas.
+* **The Adviser (The Strategist):** A slow, extremely heavy reasoning model (e.g., DeepSeek-R1, Qwen 397B). It is invoked exclusively when the Brain encounters critical bottlenecks or requires strategic redirection.
+* **Universal Sub-Agents:** The Brain has the ability to dynamically spawn its own temporary LLM sub-agents to delegate isolated tasks, test prompt engineering, or request second opinions using custom temperature and parameters.
 
 ### 2. The Auto-Retry Loop
 LLMs sometimes make syntax errors. Instead of burdening the Brain's context window with Python tracebacks, the system contains an internal validation loop. If the newly written code fails a `py_compile` check, it automatically increments the generation seed and asks the Coder model to try again, completely hiding this debugging process from the main chat.
@@ -66,12 +68,12 @@ To prevent overwhelming the AI with hundreds of tools and memories, knowledge is
 
 ### 4. Persistent Sessions & Isolated Environments
 Workspaces are strictly isolated. The system dynamically generates unique `Session_ID` folders. 
-* **State-Driven Restart:** The framework operates entirely on state files, not temporary RAM. When you resume a session, the Brain instantly re-loads its `current_history.json` and perfectly remembers exactly where it left off, alongside all its forged tools and stored memories. 
+* **State-Driven Restart:** The framework operates entirely on state files, not temporary RAM. When you resume a session, the Brain instantly re-loads its `current_history.json` and perfectly remembers exactly where it left off, alongside all its forged tools, stored memories, and master plans. 
 * **Micro-Environments:** Every single session automatically initializes its own pixi project (`pixi.toml` and `.pixi` folder). When the AI installs a third-party library for a tool, it is installed *only* into that specific session's environment, keeping your host machine completely clean.
 * **Bioconda Injection:** Every new workspace is automatically configured to pull from the `bioconda` conda channel, giving the AI immediate access to thousands of pre-compiled bioinformatics tools.
 
 ### 5. Fully Asynchronous Streaming
-The system utilizes AsyncOpenAI for fully asynchronous streaming. When a massive model takes up to 60 seconds to "think" and generate its reasoning tokens, the Python event loop remains unblocked. This ensures the background stdio connection to the Podman container never starves or drops, keeping the environment perfectly stable during long execution cycles.
+The system utilizes AsyncOpenAI for fully asynchronous streaming across all agents. Both the main Brain on the host and the background FastMCP tools (Coder, Summarizer, Adviser) use `async/await`. When a massive model takes up to 90 seconds to "think," the Python event loop remains unblocked. This ensures the background stdio connection to the Podman container never starves or drops, keeping the environment perfectly stable during long execution cycles.
 
 ### 6. Strict JSON Schema Pipelines
 To guarantee system stability, background agents (like the Summarizer) do not rely on standard prompting. They use OpenAI's native Structured Outputs (`"strict": True`). This enforces mathematical compliance at the API level, ensuring the AI cannot hallucinate a broken comma or invalid schema that would corrupt the `current_history.json` or registry files.
@@ -83,6 +85,11 @@ To prevent the AI from reinventing the wheel with complex Python scripts, the sa
 * **Media & Documents:** Pre-loaded with `tesseract-ocr`, `poppler-utils` (for direct PDF extraction), and `ffmpeg`.
 * **Headless Browsing:** Includes `chromium` and `xvfb` for robust, headless web scraping and literature acquisition.
 * **Scientific Rendering & Reporting:** Uses `graphviz` to render complex networks and `pandoc` to compile the AI's markdown findings directly into HTML, Word, or scientific PDF formats.
+
+### 8. Master Planning & Self-Correction
+To prevent the Brain from getting lost in the weeds of complex multi-step tasks, the framework utilizes persistent strategic states:
+* **The Master Plan:** The Brain maintains a persistent Markdown file (`active_plan.md`) in its state folder to track overall objectives and checklists. It reads this plan upon waking up and seamlessly updates it when milestones are reached.
+* **The Red Team Loop (Adviser):** If the Brain gets stuck on a coding error or logical dead end, it uses the `consult_adviser` tool. This packages the current plan, registries, and the encountered problem, and sends it to a Senior Adviser LLM. The Adviser generates a timestamped strategic advisory report saved to disk, enabling true autonomous self-correction without user hand-holding.
 
 ---
 
@@ -99,7 +106,7 @@ To prevent the AI from reinventing the wheel with complex Python scripts, the sa
 * **Workspace Isolation:** The `/app/workspace` is split to protect the AI's "mind" from its "hands":
   * `/sandbox`: The scratchpad where the AI actually executes bash commands and tests tools.
   * `/outputs`: The dedicated folder where the AI saves finished artifacts and generated files.
-  * `/state`: Contains the critical JSON registries and the live `current_history.json` file.
+  * `/state`: Contains the critical JSON registries, the master plan, adviser reports, and the live `current_history.json` file.
   * `/forged_tools`: Where the generated Python scripts live.
   * `/memories`: Where the detailed Markdown files live.
 * **Zero-Trust Architecture:** The container contains absolutely NO sensitive data, API keys, or `.env` files. The AI uses hardcoded dummy keys (e.g., `sk-sandbox-fake-key`) and routes all requests to a local `host.containers.internal` gateway. Authentication and routing are securely handled by a LiteLLM proxy running safely on the Windows/WSL host, making credential theft mathematically impossible.
@@ -163,14 +170,14 @@ Example (includes option to remove unsupported flags):
     litellm_settings:
       drop_params: true
     model_list:
-      # [1] Local Model
+      # [1] Local Model (Fast Brain / Coder)
       - model_name: Qwen/Qwen3.6-35B-A3B-FP8
         litellm_params:
           model: openai/Qwen/Qwen3.6-35B-A3B-FP8
           api_base: http://localhost:64100/v1
           api_key: local-vllm-key # vLLM just needs a dummy string
 
-      # [2] Remote Model
+      # [2] Remote Model (Heavy Adviser / Strategist)
       - model_name: qwen35-397b-a17b-fp8
         litellm_params:
           model: openai/qwen35-397b-a17b-fp8
