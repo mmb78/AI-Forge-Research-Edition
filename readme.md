@@ -126,7 +126,7 @@ Your freshly installed Ubuntu instance needs a few core tools before we can begi
     sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
     
     # Generate the CDI configuration so Podman can find the GPU
-    sudo nvidia-ctk cdi generate -o /etc/cdi/nvidia.yaml
+	sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
     # Install Pixi
     curl -fsSL https://pixi.sh/install.sh | bash
@@ -221,32 +221,9 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
     FROM ghcr.io/prefix-dev/pixi:latest
     
     # We are root by default here. Install system-level scientific & media dependencies first!
-    RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        chromium \
-        xvfb \
-        git \
-        git-lfs \
-        curl \
-        unzip \
-        aria2 \
-        file \
-        jq \
-        pigz \
-        zstd \
-        poppler-utils \
-        tesseract-ocr \
-        ffmpeg \
-        graphviz \
-        pandoc \
-        build-essential \
-        cmake \
-        gfortran \
-        libgl1 \
-        libglib2.0-0 \
-        libxml2-dev \
-        libxslt-dev \
-        && rm -rf /var/lib/apt/lists/*
-    
+	RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y chromium xvfb git git-lfs curl unzip aria2 file jq pigz zstd poppler-utils tesseract-ocr ffmpeg graphviz pandoc build-essential cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
+    && rm -rf /var/lib/apt/lists/*
+	    
     # Create a non-root user
     RUN useradd -m -s /bin/bash agent
     WORKDIR /app
