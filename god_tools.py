@@ -4,6 +4,7 @@ import subprocess
 import traceback
 import logging
 import re
+from typing import Any
 from datetime import datetime
 from fastmcp import FastMCP
 from openai import AsyncOpenAI
@@ -248,39 +249,50 @@ async def query_universal_llm(
     else:
         return "Error: Invalid action. Must be 'list_models' or 'chat'."
 
-        
+
 @mcp.tool()
-def execute_bash(command: str, timeout_seconds: int = 60) -> str:
+def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: int = 60) -> str:
     """Executes a bash command STRICTLY inside the sandbox directory. 
     'timeout_seconds' defaults to 60. Increase it up to 600 if you expect a long-running process like a massive download."""
+    
+    # 1. Catch if it used 'cmd' instead of 'command'
+    if command is None and cmd is not None:
+        return "SYSTEM ERROR: You used the wrong parameter name. You MUST use 'command', not 'cmd'."
+        
+    if command is None:
+        return "SYSTEM ERROR: Missing required parameter 'command'."
+
+    # 2. Catch if it used a list/array instead of a string
+    if not isinstance(command, str):
+        return 'SYSTEM ERROR: The "command" parameter must be a SINGLE string, not a list or array. Example: command="ls -la /app"'
                     
     try:
         result = subprocess.run(
             command, 
             shell=True, 
-            cwd=SANDBOX_DIR, 
-            capture_output=True, 
+            cwd=SANDBOX_DIR,
+            stderr=subprocess.STDOUT,   # <--- MERGE ERRORS INTO STDOUT
+            stdout=subprocess.PIPE,     # <--- CAPTURE THE MERGED STREAM
             text=True, 
             timeout=timeout_seconds,
             stdin=subprocess.DEVNULL,   # Prevents children from stealing the MCP input stream
             start_new_session=True      # Traps grandchild daemons (like Playwright) in an isolated process group
         )
-        
-        output = result.stdout if result.returncode == 0 else result.stderr
+
+        output = result.stdout # Now contains everything (prints AND errors)
         
         # Preview + File Redirection Prompt ---
         if len(output) > 5000:
             preview = output[:1000] # Give it just enough to see the structure/headers
-            return (f"Exit Code: {result.returncode}\n"
-                    f"Output Preview (First 1000 chars):\n{preview}\n\n"
+            return (f"Exit Code: {result.returncode}\nOutput Preview (First 1000 chars):\n{preview}\n\n"
                     f"... [SYSTEM WARNING: The full output was over 5000 characters and has been truncated. "
                     f"Do NOT attempt to parse this preview. If you need the full data, run your command again "
-                    f"and append `> filename.txt` to save it to a file. Then, write a Python tool to ANALYZE or "
-                    f"EXTRACT specific information from that file, ensuring your tool only prints a concise summary or the exact target data.]")
+                    f"and append `> filename.txt` to save it to a file. Then, write a Python tool to extract the specific info.]")
 
         return f"Exit Code: {result.returncode}\nOutput:\n{output}"
     except Exception as e:
         return f"Error executing command: {str(e)}"
+
 
 # --- MEMORY TOOLS ---
 @mcp.tool()
@@ -315,6 +327,33 @@ def read_memory(category: str, memory_title: str) -> str:
         return "Error: Memory or Category not found. Use view_memory_registry to see available options."
     except Exception as e:
         return f"Error reading memory file: {str(e)}"
+
+@mcp.tool()
+def store_memory(category: str, category_description: str, title: str, short_description: str, detailed_markdown: str) -> str:
+    """Proactively stores an important fact, completed objective, or context into the long-term Memory Registry."""
+    memories = load_json(MEMORY_REGISTRY_FILE)
+    
+    if category not in memories:
+        memories[category] = {"category_description": category_description, "memories": {}}
+    else:
+        memories[category]["category_description"] = category_description
+        
+    safe_title = re.sub(r'[^a-zA-Z0-9_]', '', title) or "memory"
+    timestamp_prefix = datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = f"{timestamp_prefix}_{safe_title}.md"
+    filepath = os.path.join(MEMORIES_DIR, filename)
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(detailed_markdown)
+        
+    memories[category]["memories"][title] = {
+        "description": short_description,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "file": f"memories/{filename}"
+    }
+    
+    save_json(MEMORY_REGISTRY_FILE, memories)
+    return f"SUCCESS: Memory '{title}' saved to category '{category}'."
 
 @mcp.tool()
 async def compress_and_store_context() -> str:
@@ -409,7 +448,7 @@ async def compress_and_store_context() -> str:
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "file": f"memories/{filename}"
             }
-            added_titles.append(title)
+            added_titles.append(f"{{'category': '{cat}', 'title': '{title}'}}")
             
         save_json(MEMORY_REGISTRY_FILE, current_memories)
         
@@ -447,19 +486,20 @@ async def compress_and_store_context() -> str:
         }
     }
 
+
     api_args["messages"] = [
         {"role": "system", "content": (
             "You are a context compressor. Analyze the bloated chat log. "
-            "Output a new, tiny chat log containing ONLY a single 'user' message, and an 'assistant' acknowledgment. "
-            "Do NOT output the system prompt.\n\n"
+            "Output a new, tiny chat log containing ONLY a single 'user' message. "
+            "Do NOT output an 'assistant' acknowledgment or the system prompt.\n\n"
             "CRITICAL: The 'user' message MUST contain three distinct sections:\n"
             "1. 'Current State': A summary of what has been accomplished so far.\n"
-            "2. 'Active Plan & Next Steps': Explicitly list the pending tasks, or the exact next action the Brain was about to take before the context limit was reached.\n"
-            "3. 'Pending User Input': Look at the very last message sent by the user before the compression was triggered. If it was a question or direct instruction, copy it here exactly so it is not forgotten."
+            "2. 'Active Plan & Next Steps': Explicitly list the pending tasks, or the exact next action the Brain was about to take.\n"
+            "3. 'Pending User Input': Look at the very last message sent by the user before the compression. Copy it here exactly."
         )},
         {"role": "user", "content": bloated_text}
     ]
-    
+        
     api_args["response_format"] = compression_schema
 
     try:
@@ -478,7 +518,7 @@ async def compress_and_store_context() -> str:
         
         save_json(CURRENT_HISTORY_FILE, new_history)
         
-        return f"SUCCESS: Context compressed and old history moved to {os.path.basename(backup_file)}. \nNew detailed memories extracted to disk: {added_titles}. \n[SYSTEM INSTRUCTION: Your context has been reset. Read your 'Active Plan' and proceed immediately.]"
+        return f"SUCCESS: Context compressed and old history moved to {os.path.basename(backup_file)}. \nNew detailed memories extracted to disk: {added_titles}. \n[SYSTEM INSTRUCTION: Your context has been reset. Review your 'Active Plan' ONLY if you previously created one. Otherwise, read your summarized Next Steps and proceed immediately.]"
 
     except Exception as e:
         return f"FAILED during History Compression Phase. Error: {str(e)}"

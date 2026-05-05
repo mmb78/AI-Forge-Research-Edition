@@ -91,6 +91,16 @@ To prevent the Brain from getting lost in the weeds of complex multi-step tasks,
 * **The Master Plan:** The Brain maintains a persistent Markdown file (`active_plan.md`) in its state folder to track overall objectives and checklists. It reads this plan upon waking up and seamlessly updates it when milestones are reached.
 * **The Red Team Loop (Adviser):** If the Brain gets stuck on a coding error or logical dead end, it uses the `consult_adviser` tool. This packages the current plan, registries, and the encountered problem, and sends it to a Senior Adviser LLM. The Adviser generates a timestamped strategic advisory report saved to disk, enabling true autonomous self-correction without user hand-holding.
 
+### 9. Intelligent Loop Detection (The Runaway Train Failsafe)
+To prevent the AI from burning tokens in infinite error loops, the Overseer script tracks consecutive, uninterrupted tool calls. Every 100 tool calls, it triggers a "Soft Pause" by injecting a system prompt that forces the Brain to self-evaluate its progress. If the AI hits 300 consecutive tool chains, the system executes a "Hard Stop," protecting API limits and forcing the AI to await human intervention.
+
+### 10. Perfect Temporal Awareness (The Live Clock)
+Traditional agents lose track of time during long workflows. This framework utilizes a "Sweep & Replace" dynamic time injection. On every single API turn, the AI's context is injected with a Live System Clock down to the exact second. This allows the AI to accurately timestamp files and memories, without bloating the permanent `current_history.json` log with stale timestamps.
+
+### 11. Self-Healing JSON Interception
+Smaller or quantized models occasionally hallucinate malformed JSON when calling tools. The MCP server sits between the LLM and the tools, intercepting `JSONDecodeError` failures. Instead of crashing the script, it instantly returns a `SYSTEM ERROR` directly to the LLM, prompting it to fix its syntax and try again autonomously.
+
+
 ---
 
 ## 🛡️ Sandboxing & Workspace Structure (Podman)
@@ -225,31 +235,41 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 
 *(Note: We deliberately do not `COPY` the Python scripts into this image. They are mapped dynamically via volumes at runtime. This allows you to tweak your prompts and Python code on the host machine endlessly without ever needing to rebuild the container cache!)*
 
-    FROM ghcr.io/prefix-dev/pixi:latest
-    
-    # We are root by default here. Install system-level scientific & media dependencies first!
-	RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y chromium xvfb git git-lfs curl unzip aria2 file jq pigz zstd poppler-utils tesseract-ocr ffmpeg graphviz pandoc build-essential cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
-    && rm -rf /var/lib/apt/lists/*
-	    
-    # Create a non-root user
-    RUN useradd -m -s /bin/bash agent
-    WORKDIR /app
-    
-    # Disable the FastMCP ASCII Banner
-    ENV FASTMCP_SHOW_SERVER_BANNER=0
-    
-    # Initialize project and dependencies
-    RUN pixi init && \
-        pixi add python openai mcp fastmcp
-    
-    # Create the master mount point so we can give it proper permissions
-    RUN mkdir /app/workspace
-    
-    # Change ownership of everything in /app to the restricted user
-    RUN chown -R agent:agent /app
-    
-    # Switch to the non-root user
-    USER agent
+	FROM ghcr.io/prefix-dev/pixi:latest
+
+	# ROOT LEVEL: Install system-level scientific & media dependencies
+	RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+		chromium xvfb git git-lfs curl unzip aria2 file jq pigz zstd \
+		poppler-utils tesseract-ocr ffmpeg graphviz pandoc build-essential \
+		cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
+		&& rm -rf /var/lib/apt/lists/*
+
+	# USER SETUP
+	RUN useradd -m -s /bin/bash agent
+	WORKDIR /app
+
+	# Disable the FastMCP ASCII Banner ---
+	ENV FASTMCP_SHOW_SERVER_BANNER=0
+
+	RUN mkdir /app/workspace && chown -R agent:agent /app
+
+	# Switch to non-root user before installing Python tools
+	USER agent
+
+	# We add conda-forge and bioconda to give the AI maximum scientific reach
+	RUN pixi init && \
+		pixi project channel add conda-forge && \
+		pixi project channel add bioconda && \
+		pixi add python openai mcp fastmcp \
+		pandas numpy scipy matplotlib \
+		requests beautifulsoup4 lxml playwright \
+		pypdf2 python-docx \
+		biopython rdkit
+
+	# PRE-FETCH BROWSER BINARIES
+	# This downloads the headless chromium binary into the agent's cache permanently
+	RUN pixi run playwright install chromium
+
 
 Build the rootless image by running:
 

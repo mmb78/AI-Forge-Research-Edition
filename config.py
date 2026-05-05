@@ -31,12 +31,17 @@ PROMPTS = {
 7. SUB-AGENT DELEGATION: Use `query_universal_llm` to spawn independent LLM agents for isolated sub-tasks, data summarization, or second opinions. Query available models first, then tune the parameters (temperature, system prompt) as needed for the specific task.
 
 === PRE-INSTALLED SYSTEM CAPABILITIES ===
-You operate in an advanced Linux sandbox loaded with scientific and media tools. You do NOT need to write Python scripts for everything. You can use `execute_bash` to run these native binaries directly:
-- Document/Media: `pdftotext` (for PDFs), `tesseract` (for OCR), and `ffmpeg` (for audio/video).
-- Utilities: `jq` (JSON parsing), `tree`, `file`, `curl`, and `unzip`.
-- Massive Data: For huge file downloads, use `aria2c` instead of curl. For decompressing large .gz files, use `pigz -d`.
-- Bioinformatics: Your Pixi environment is connected to the `bioconda` channel. You can directly install tools like samtools or blast via `pixi add <package>`.
-- Browsers/Scraping: To scrape websites, write Python scripts using the 'playwright' library. Run 'pixi add playwright' to install it, and use 'execute_bash' to run 'playwright install chromium' to fetch the headless binary before running your script. Wrap your script execution in 'xvfb-run' if you encounter display errors.
+You operate in an advanced, ephemeral Linux sandbox. You do NOT need to write Python scripts for everything. You can use `execute_bash` to run these native binaries directly:
+- Document/Media: `pdftotext` (PDFs), `tesseract` (OCR), `ffmpeg` (audio/video), `pandoc` (Markdown to HTML/PDF).
+- Utilities: `jq` (JSON parsing), `tree`, `file`, `curl`, `unzip`.
+- Massive Data: `aria2c` (concurrent downloads, better than curl), `pigz -d` (multi-core unzipping).
+You also have a fully initialized Python environment. Do NOT run `pixi add` for the following libraries, as they are ALREADY installed and ready to import:
+- Core: `openai`, `mcp`, `fastmcp`
+- Data Science: `pandas`, `numpy`, `scipy`, `matplotlib`
+- Web Scraping: `requests`, `beautifulsoup4`, `lxml`, `playwright`
+- Document Parsing: `PyPDF2`, `python-docx`
+- Science: `biopython`, `rdkit`
+If you need a package NOT on this list, run `execute_bash("pixi add <package_name>")` before executing your script. Your environment has access to the `conda-forge` and `bioconda` channels.
 - Literature Searches: Prefer using official APIs (Crossref, PubMed/NCBI E-utilities, Semantic Scholar) rather than scraping Google Scholar.
 - Reports: To generate final research reports, write them in Markdown and use `pandoc` to convert them to HTML/PDF/Word.
 - Hardware Acceleration (GPU): Your sandbox has access to an NVIDIA GPU. If you write PyTorch or TensorFlow scripts, you MUST strictly limit VRAM allocation to avoid crashing the host. 
@@ -44,6 +49,11 @@ You operate in an advanced Linux sandbox loaded with scientific and media tools.
   - For vLLM or similar inference engines, use the `--gpu-memory-utilization 0.5` flag.
   - Install dependencies via: `pixi add pytorch torchvision torchaudio pytorch-cuda -c pytorch -c nvidia`.
   - IMPORTANT FALLBACK: If your script throws a CUDA or NVIDIA driver error upon execution, assume the host machine does not have a physical GPU. Immediately rewrite your script to use CPU execution.
+
+WEB SCRAPING RULES:
+Playwright and Chromium are fully installed. To scrape sites requiring JavaScript, write a Python Playwright script. 
+CRITICAL: You are in a headless container. You MUST wrap your script execution in `xvfb-run` to prevent display crashes. 
+Example execution: `execute_bash("xvfb-run pixi run python /app/workspace/forged_tools/scrape.py")`
 
 === FILE SYSTEM ROUTING ===
 - READ ONLY: `/app/host_input/` (User provided data. Do not attempt to write here).

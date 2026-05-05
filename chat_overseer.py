@@ -53,16 +53,7 @@ os.makedirs(f"{SESSION_DIR}/outputs", exist_ok=True)
 # Build the isolated folder structure for input/output folders
 os.makedirs(config.HOST_INPUT_DIR, exist_ok=True)
 
-# --- Initialize an isolated Pixi environment for this specific session! ---
-if not os.path.exists(f"{SESSION_DIR}/pixi.toml"):
-    # Create the project
-    subprocess.run(["pixi", "init"], cwd=SESSION_DIR, capture_output=True)
-    
-    # SYSTEM UPGRADE: Inject the Bioconda channel for bioinformatics tools!
-    subprocess.run(["pixi", "project", "channel", "add", "bioconda"], cwd=SESSION_DIR, capture_output=True)
-    
-    # Add base python so the agent's scripts can run out of the box
-    subprocess.run(["pixi", "add", "python"], cwd=SESSION_DIR, capture_output=True)
+# --- Pixi environment already baked into the podman container! ---
 
 # Point the log file to this specific session
 LOG_FILE = f"{SESSION_DIR}/logs/chat_log_{timestamp}.txt"
@@ -216,26 +207,47 @@ async def run_chat():
                         messages.append({"role": "user", "content": user_input})
                         save_history(messages)
 
+                        # --- ESCALATING LOOP DETECTION (INIT) ---
+                        consecutive_tool_chains = 0
+                        
                         while True:
                             try:
                                 messages = load_history()
-                                temp_messages = copy.deepcopy(messages)
                                 
-                                # TOKEN WARNING INJECTION
-                                # Fall back to heuristic only if it's the very first turn and we have no API token data yet
-                                current_token_estimate = last_known_tokens if last_known_tokens > 0 else estimate_tokens(temp_messages)
+                                # --- 1. TIME INJECTION (Sweep & Replace) ---
+                                # Remove any previous system clocks to prevent bloat
+                                messages = [msg for msg in messages if not (msg.get("role") == "user" and "[SYSTEM CLOCK:" in str(msg.get("content")))]
+                                
+                                # Inject the fresh clock
+                                live_time = datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
+                                messages.insert(1, {
+                                    "role": "user", 
+                                    "content": f"[SYSTEM CLOCK: It is currently {live_time}]"
+                                })
+
+                                # --- 2. TOKEN WARNING INJECTION ---
+                                current_token_estimate = last_known_tokens if last_known_tokens > 0 else estimate_tokens(messages)
                                 pct = current_token_estimate / config.MAX_CONTEXT_TOKENS
                                 
                                 if pct >= 0.75:
+                                    # Prevent appending multiple warnings in a row if the AI ignores it for a few turns
+                                    messages = [msg for msg in messages if not (msg.get("role") == "user" and "[SYSTEM WARNING: Your context window is at" in str(msg.get("content")))]
+                                    
                                     warn_msg = f"[SYSTEM WARNING: Your context window is at ~{pct*100:.0f}%. "
                                     if pct >= 0.90: warn_msg += "CRITICAL LIMIT REACHED. You MUST use the compress_and_store_context tool immediately.]"
                                     else: warn_msg += "Consider finishing your current task and using the compress_and_store_context tool soon.]"
-                                    temp_messages.append({"role": "user", "content": warn_msg})
+                                    
+                                    messages.append({"role": "user", "content": warn_msg})
                                     print(f"\n{COLOR_YELLOW}{warn_msg}{COLOR_RESET}")
+                                    log_event("SYSTEM", warn_msg)
 
+                                # --- 3. SAVE THE PURIST HISTORY BEFORE API CALL ---
+                                save_history(messages)
+
+                                # Setup API args using the true, saved messages
                                 api_args = brain_profile["api_params"].copy()
                                 api_args["model"] = brain_profile["model"]
-                                api_args["messages"] = temp_messages
+                                api_args["messages"] = messages
                                 api_args["tools"] = openai_tools
                                 api_args["stream"] = True
                                 api_args["stream_options"] = {"include_usage": True}
@@ -386,19 +398,38 @@ async def run_chat():
 
                                     out_color = COLOR_ORANGE if name in ["forge_and_register_tool", "compress_and_store_context"] else COLOR_DARK_GREEN
                                     log_event(f"TOOL RESULT ({time.time() - start:.2f}s)", output, text_color=out_color)
-                                    
+
+
                                     if name == "compress_and_store_context":
                                         print(f"\n{COLOR_ORANGE}[SYSTEM] Reloading compressed state from disk...{COLOR_RESET}")
                                         messages = load_history()
-                                        # Prevent orphaned tool API crashes by injecting success as a system alert instead of a 'tool' role
-                                        messages.append({
-                                            "role": "user",
-                                            "content": f"[SYSTEM MESSAGE: Memory Manager completed successfully. \n{output}]"
-                                        })
+                                        
+                                        # 1. Append the original assistant message (Preserves the chain!)
+                                        messages.append(assistant_message)
+                                        
+                                        # 2. SATISFY THE API: Provide a 'tool' response for EVERY tool called in this turn
+                                        for tc in assistant_message["tool_calls"]:
+                                            if tc["function"]["name"] == "compress_and_store_context":
+                                                messages.append({
+                                                    "role": "tool",
+                                                    "tool_call_id": tc["id"],
+                                                    "name": tc["function"]["name"],
+                                                    "content": output
+                                                })
+                                            else:
+                                                # Fallback for parallel tools that got wiped by the compression
+                                                messages.append({
+                                                    "role": "tool",
+                                                    "tool_call_id": tc["id"],
+                                                    "name": tc["function"]["name"],
+                                                    "content": "[SYSTEM NOTE: Output lost due to memory compression. If this tool was important, run it again.]"
+                                                })
+                                        
                                         save_history(messages)
-                                        # Reset exact token count so it gets naturally updated on next generation
                                         last_known_tokens = 0 
-                                        break # Stop iterating other tools since the context window just radically changed
+                                        consecutive_tool_chains = 0
+                                        break # Stop iterating since context changed
+                                    
                                     else:
                                         messages = load_history()
                                         messages.append({
@@ -409,6 +440,29 @@ async def run_chat():
                                         })
                                         save_history(messages)
 
+                                # --- ESCALATING LOOP DETECTION (CHECK) ---
+                                consecutive_tool_chains += 1
+
+                                if consecutive_tool_chains >= 300:
+                                    # Hard Stop: Protect the API limits
+                                    halt_msg = f"[SYSTEM METRIC: You have executed {consecutive_tool_chains} consecutive tool chains. For safety and observability, you MUST STOP using tools now. Summarize your progress and ask the user for permission to continue.]"
+                                    messages = load_history()
+                                    messages.append({"role": "user", "content": halt_msg})
+                                    save_history(messages)
+                                    print(f"\n{COLOR_YELLOW}[SYSTEM: Hard pause triggered ({consecutive_tool_chains} chains). Forcing Brain to wait for user.]{COLOR_RESET}")
+                                    log_event("SYSTEM", halt_msg)
+                                    consecutive_tool_chains = -999 # Prevent re-triggering while it writes the summary
+                                
+                                elif consecutive_tool_chains > 0 and consecutive_tool_chains % 100 == 0:
+                                    # Soft Reflection: Ask the AI to evaluate itself
+                                    eval_msg = f"[SYSTEM METRIC: You have executed {consecutive_tool_chains} consecutive tool chains. Please review your recent actions. Are you making steady progress, or are you stuck in an error loop? If you are stuck or repeatedly failing, STOP using tools and ask the user for input. If you are making legitimate progress, continue.]"
+                                    messages = load_history()
+                                    messages.append({"role": "user", "content": eval_msg})
+                                    save_history(messages)
+                                    print(f"\n{COLOR_YELLOW}[SYSTEM: Soft pause triggered ({consecutive_tool_chains} chains). Prompting Brain to self-evaluate.]{COLOR_RESET}")
+                                    log_event("SYSTEM", eval_msg)
+                              
+                                    
                             except (KeyboardInterrupt, asyncio.CancelledError):
                                 print(f"\n\n{COLOR_RED}[SYSTEM] 🛑 Process manually interrupted! Returning to prompt...{COLOR_RESET}")
                                 log_event("SYSTEM", "Process manually interrupted by user.")
