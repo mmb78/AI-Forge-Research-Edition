@@ -190,12 +190,13 @@ async def run_chat():
 
     # THE SELF-HEALING CONNECTION LOOP
     while not quit_app:
+        container_name = f"forge_sandbox_{active_session}_{os.getpid()}"
         # Clear stale Podman WSL state before every single boot/reboot ---
         if config.CONSOLE_MODE != "silent":
             print(f"{COLOR_DIM}Sweeping stale Podman state...{COLOR_RESET}")
 
         subprocess.run(
-            f"podman rm -f -i forge_sandbox_{timestamp}",
+            f"podman rm -f -i {container_name}",
             #"podman system prune -f && podman rm -f $(podman ps -aq)",
             #"rm -rf ~/.podman-run/containers ~/.podman-run/libpod/tmp",
             shell=True, 
@@ -218,7 +219,7 @@ async def run_chat():
                 args=[
                     "--log-level=error",
                     "run", "-i", "--rm",
-                    f"--name=forge_sandbox_{timestamp}", # Unique identifier
+                    f"--name={container_name}", # True unique identifier
                     "--network=slirp4netns", # networking mode built specifically for rootless Podman
                     "--add-host=host.containers.internal:host-gateway",
                     "--security-opt=no-new-privileges:true", # Prevent privilege escalation

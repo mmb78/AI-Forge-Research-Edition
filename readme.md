@@ -332,6 +332,27 @@ If the session grows too long, the system will inject a dynamic warning promptin
 
 ---
 
+### 🐝 Swarm Mode (Parallel Execution)
+Because the framework strictly isolates state, memory, and Podman execution environments (dynamically generating container names via Session IDs and OS Process IDs), you can run multiple autonomous agents simultaneously on the same machine without them colliding.
+
+You can use `tmux` to launch a multi-agent swarm in a 2x2 split-pane dashboard. Paste this chained command into your terminal to boot 4 independent researchers at once:
+
+    tmux new-session -d -s forge_swarm \; \
+      send-keys "pixi run python chat_overseer.py -f text -s 'Swarm_Text_1'" C-m \; \
+      split-window -h \; \
+      send-keys "pixi run python chat_overseer.py -f text -s 'Swarm_Text_2'" C-m \; \
+      split-window -v \; \
+      send-keys "pixi run python chat_overseer.py -f formatted -s 'Swarm_MD_2'" C-m \; \
+      select-pane -t 0 \; \
+      split-window -v \; \
+      send-keys "pixi run python chat_overseer.py -f formatted -s 'Swarm_MD_1'" C-m \; \
+      select-layout tiled \; \
+      attach-session -t forge_swarm
+
+**Pro-Tip for Swarm Management:** 
+Enable mouse support in your tmux configuration (`echo "set -g mouse on" >> ~/.tmux.conf`) so you can simply click between your agents, drag the window borders to resize their panels, and use your mouse wheel to independently scroll through their individual reasoning logs!
+
+
 ## 📖 Monitoring & Logs
 
 Every interaction is mirrored to a timestamped log file inside your active session folder (e.g., `sessions/Session_ID_.../logs/`). This includes the Brain's reasoning tokens, tool payloads, and the Coder's intercepted internal thoughts which are hidden from the Brain to save context space.
