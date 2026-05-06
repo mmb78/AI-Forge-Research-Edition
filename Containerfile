@@ -2,11 +2,11 @@ FROM ghcr.io/prefix-dev/pixi:latest
 
 # ROOT LEVEL: Install system-level scientific & media dependencies
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    chromium xvfb git git-lfs curl unzip aria2 file jq pigz zstd \
-    poppler-utils tesseract-ocr ffmpeg graphviz pandoc build-essential \
-    cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
+    chromium xvfb git git-lfs curl wget unzip aria2 file jq pigz zstd \
+    poppler-utils tesseract-ocr ffmpeg imagemagick graphviz pandoc sqlite3 \
+    build-essential cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
     && rm -rf /var/lib/apt/lists/*
-
+	
 # USER SETUP
 RUN useradd -m -s /bin/bash agent
 WORKDIR /app
@@ -23,12 +23,12 @@ USER agent
 RUN pixi init && \
     pixi project channel add conda-forge && \
     pixi project channel add bioconda && \
-    pixi add python openai mcp fastmcp \
-    pandas numpy scipy matplotlib \
+    pixi add python pip openai mcp fastmcp \
+    pandas numpy scipy matplotlib pyarrow \
     requests beautifulsoup4 lxml playwright \
-    pypdf2 python-docx \
-    biopython rdkit
-
+    pypdf2 python-docx pillow tiktoken \
+    biopython rdkit sqlalchemy networkx
+		
 # PRE-FETCH BROWSER BINARIES
 # This downloads the headless chromium binary into the agent's cache permanently
 RUN pixi run playwright install chromium

@@ -69,7 +69,7 @@ To prevent overwhelming the AI with hundreds of tools and memories, knowledge is
 ### 4. Persistent Sessions & Isolated Environments
 Workspaces are strictly isolated. The system dynamically generates unique `Session_ID` folders. 
 * **State-Driven Restart:** The framework operates entirely on state files, not temporary RAM. When you resume a session, the Brain instantly re-loads its `current_history.json` and perfectly remembers exactly where it left off, alongside all its forged tools, stored memories, and master plans. 
-* **Micro-Environments:** Every single session automatically initializes its own pixi project (`pixi.toml` and `.pixi` folder). When the AI installs a third-party library for a tool, it is installed *only* into that specific session's environment, keeping your host machine completely clean.
+* **Layered Micro-Environments (Base + Delta):** The heavy, complex dependencies (like C++ libraries and Chromium) are locked safely in the container's base Pixi image. When the AI installs a new third-party library for a specific tool, it uses a background `pip --target` injection. This places the tiny Python files directly into a `custom_packages` folder inside that specific session's mapped workspace, keeping your hard drive completely free of 2GB redundant bloat while retaining perfect session persistence.
 * **Bioconda Injection:** Every new workspace is automatically configured to pull from the `bioconda` conda channel, giving the AI immediate access to thousands of pre-compiled bioinformatics tools.
 
 ### 5. Fully Asynchronous Streaming
@@ -239,11 +239,11 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 
 	# ROOT LEVEL: Install system-level scientific & media dependencies
 	RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-		chromium xvfb git git-lfs curl unzip aria2 file jq pigz zstd \
-		poppler-utils tesseract-ocr ffmpeg graphviz pandoc build-essential \
-		cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
+		chromium xvfb git git-lfs curl wget unzip aria2 file jq pigz zstd \
+		poppler-utils tesseract-ocr ffmpeg imagemagick graphviz pandoc sqlite3 \
+		build-essential cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
 		&& rm -rf /var/lib/apt/lists/*
-
+		
 	# USER SETUP
 	RUN useradd -m -s /bin/bash agent
 	WORKDIR /app
@@ -260,16 +260,15 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 	RUN pixi init && \
 		pixi project channel add conda-forge && \
 		pixi project channel add bioconda && \
-		pixi add python openai mcp fastmcp \
-		pandas numpy scipy matplotlib \
+		pixi add python pip openai mcp fastmcp \
+		pandas numpy scipy matplotlib pyarrow \
 		requests beautifulsoup4 lxml playwright \
-		pypdf2 python-docx \
-		biopython rdkit
-
+		pypdf2 python-docx pillow tiktoken \
+		biopython rdkit sqlalchemy networkx
+			
 	# PRE-FETCH BROWSER BINARIES
 	# This downloads the headless chromium binary into the agent's cache permanently
 	RUN pixi run playwright install chromium
-
 
 Build the rootless image by running:
 
@@ -300,7 +299,7 @@ Once the chat starts, try issuing a complex command:
 2. The Brain calls `forge_and_register_tool` via the secure Podman MCP connection.
 3. The **MCP Server** pings the **Coder LLM** through the `host.containers.internal` gateway to write `fibonacci.py`.
 4. The system sanitizes the filename and runs a syntax check. If it passes, it updates `tool_registry.json`.
-5. The Brain reads the usage instructions, then uses `execute_bash` to run it: `pixi run python /app/workspace/forged_tools/fibonacci.py`.
+5. The Brain reads the usage instructions, then uses `execute_bash` to run it: `python /app/workspace/forged_tools/fibonacci.py`.
 6. The result is streamed back to your color-coded console.
 
 ### Context Compression & Observability

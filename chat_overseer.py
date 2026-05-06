@@ -125,9 +125,12 @@ async def run_chat():
     # Clear stale Podman WSL state ---
     print(f"{COLOR_DIM}Sweeping stale Podman state...{COLOR_RESET}")
     subprocess.run(
-        "rm -rf ~/.podman-run/containers ~/.podman-run/libpod/tmp",
+        f"podman rm -f -i forge_sandbox_{timestamp}",
+        #"podman system prune -f && podman rm -f $(podman ps -aq)",
+        #"rm -rf ~/.podman-run/containers ~/.podman-run/libpod/tmp",
         shell=True, 
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL
     )
 
     prompt_session = PromptSession()
@@ -147,6 +150,7 @@ async def run_chat():
                 args=[
                     "--log-level=error",
                     "run", "-i", "--rm",
+                    f"--name=forge_sandbox_{timestamp}", # Unique identifier
                     "--network=slirp4netns", # networking mode built specifically for rootless Podman
                     "--add-host=host.containers.internal:host-gateway",
                     "--security-opt=no-new-privileges:true", # Prevent privilege escalation
@@ -161,8 +165,18 @@ async def run_chat():
                     "-v", f"{os.path.abspath('./config.py')}:/app/config.py:ro,Z",
                     "-v", f"{os.path.abspath('./god_tools.py')}:/app/god_tools.py:ro,Z",
                     "-v", f"{config.HOST_INPUT_DIR}:/app/host_input:ro,Z", # same for all sessions, read only
-                    "ai-forge",           
-                    "pixi", "run", "-q", "--locked", "python", "god_tools.py"
+                    "ai-forge",
+                    "bash", "-c", """
+                    # 1. Ensure the persistent custom packages folder exists
+                    mkdir -p /app/workspace/custom_packages
+                    
+                    # 2. Tell Python to load packages from both the Pixi Base AND the Session Delta
+                    export PYTHONPATH=/app/workspace/custom_packages:$PYTHONPATH
+                    
+                    # 3. Start the MCP server using the Base Image's heavy Pixi environment
+                    cd /app/workspace
+                    pixi run --manifest-path /app/pixi.toml -q python /app/god_tools.py
+                    """
                 ]
             )
             
@@ -331,10 +345,13 @@ async def run_chat():
                                 if not tool_calls_dict:
                                     break
 
+                                # --- Initialize the RAM cache for parallel tool outputs ---
+                                executed_tool_outputs = {}
 
                                 for tc_data in assistant_message["tool_calls"]:
                                     name = tc_data["function"]["name"]
                                     args_str = tc_data["function"]["arguments"]
+                                    tc_id = tc_data["id"]
                                     
                                     # --- Intercept and self-heal bad JSON ---
                                     try:
@@ -345,15 +362,18 @@ async def run_chat():
                                         log_event("TOOL CALL", f"Requesting: {name}\nArgs: [MALFORMED JSON]\n{args_str}")
                                         log_event("TOOL RESULT (0.00s)", error_msg, text_color=COLOR_RED)
                                         
+                                        # Cache the error so it survives compression!
+                                        executed_tool_outputs[tc_id] = error_msg 
+                                        
                                         messages = load_history()
                                         messages.append({
                                             "role": "tool",
-                                            "tool_call_id": tc_data["id"],
+                                            "tool_call_id": tc_id,
                                             "name": name,
                                             "content": error_msg
                                         })
                                         save_history(messages)
-                                        continue # Skip sending this broken request to the container!
+                                        continue 
 
                                     log_event("TOOL CALL", f"Requesting: {name}\nArgs: {json.dumps(args, indent=2)}")
                                     
@@ -364,8 +384,10 @@ async def run_chat():
                                         
                                     start = time.time()
                                     result = await session.call_tool(name, args)
-                                    
                                     output = result.content[0].text
+                                    
+                                    # --- NEW: Save the real output to our RAM dictionary immediately ---
+                                    executed_tool_outputs[tc_id] = output
                                     
                                     coder_thoughts = ""
                                     coder_code = ""
@@ -399,42 +421,36 @@ async def run_chat():
                                     out_color = COLOR_ORANGE if name in ["forge_and_register_tool", "compress_and_store_context"] else COLOR_DARK_GREEN
                                     log_event(f"TOOL RESULT ({time.time() - start:.2f}s)", output, text_color=out_color)
 
-
                                     if name == "compress_and_store_context":
                                         print(f"\n{COLOR_ORANGE}[SYSTEM] Reloading compressed state from disk...{COLOR_RESET}")
                                         messages = load_history()
-                                        
-                                        # 1. Append the original assistant message (Preserves the chain!)
                                         messages.append(assistant_message)
                                         
-                                        # 2. SATISFY THE API: Provide a 'tool' response for EVERY tool called in this turn
+                                        # --- NEW: Rebuild sequence using the RAM cache! ---
                                         for tc in assistant_message["tool_calls"]:
-                                            if tc["function"]["name"] == "compress_and_store_context":
-                                                messages.append({
-                                                    "role": "tool",
-                                                    "tool_call_id": tc["id"],
-                                                    "name": tc["function"]["name"],
-                                                    "content": output
-                                                })
-                                            else:
-                                                # Fallback for parallel tools that got wiped by the compression
-                                                messages.append({
-                                                    "role": "tool",
-                                                    "tool_call_id": tc["id"],
-                                                    "name": tc["function"]["name"],
-                                                    "content": "[SYSTEM NOTE: Output lost due to memory compression. If this tool was important, run it again.]"
-                                                })
+                                            current_tc_id = tc["id"]
+                                            current_tc_name = tc["function"]["name"]
+                                            
+                                            # Pull the real output if it ran, otherwise fallback
+                                            final_content = executed_tool_outputs.get(current_tc_id, "[SYSTEM NOTE: Tool execution aborted due to memory compression priority.]")
+                                            
+                                            messages.append({
+                                                "role": "tool",
+                                                "tool_call_id": current_tc_id,
+                                                "name": current_tc_name,
+                                                "content": final_content
+                                            })
                                         
                                         save_history(messages)
                                         last_known_tokens = 0 
                                         consecutive_tool_chains = 0
-                                        break # Stop iterating since context changed
+                                        break 
                                     
                                     else:
                                         messages = load_history()
                                         messages.append({
                                             "role": "tool",
-                                            "tool_call_id": tc_data["id"],
+                                            "tool_call_id": tc_id,
                                             "name": name,
                                             "content": output
                                         })
@@ -454,6 +470,8 @@ async def run_chat():
                                     consecutive_tool_chains = -999 # Prevent re-triggering while it writes the summary
                                 
                                 elif consecutive_tool_chains > 0 and consecutive_tool_chains % 100 == 0:
+                                    # Sweep old soft-pauses
+                                    messages = [msg for msg in messages if not (msg.get("role") == "user" and "[SYSTEM METRIC: You have executed" in str(msg.get("content")))]
                                     # Soft Reflection: Ask the AI to evaluate itself
                                     eval_msg = f"[SYSTEM METRIC: You have executed {consecutive_tool_chains} consecutive tool chains. Please review your recent actions. Are you making steady progress, or are you stuck in an error loop? If you are stuck or repeatedly failing, STOP using tools and ask the user for input. If you are making legitimate progress, continue.]"
                                     messages = load_history()

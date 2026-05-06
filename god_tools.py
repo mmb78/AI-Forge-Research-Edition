@@ -1,9 +1,12 @@
+import asyncio
+import signal
 import os
 import json
 import subprocess
 import traceback
 import logging
 import re
+import sys
 from typing import Any
 from datetime import datetime
 from fastmcp import FastMCP
@@ -251,14 +254,13 @@ async def query_universal_llm(
 
 
 @mcp.tool()
-def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: int = 60) -> str:
+async def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: int = 60) -> str:
     """Executes a bash command STRICTLY inside the sandbox directory. 
     'timeout_seconds' defaults to 60. Increase it up to 600 if you expect a long-running process like a massive download."""
     
     # 1. Catch if it used 'cmd' instead of 'command'
     if command is None and cmd is not None:
         return "SYSTEM ERROR: You used the wrong parameter name. You MUST use 'command', not 'cmd'."
-        
     if command is None:
         return "SYSTEM ERROR: Missing required parameter 'command'."
 
@@ -266,33 +268,47 @@ def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: int = 60
     if not isinstance(command, str):
         return 'SYSTEM ERROR: The "command" parameter must be a SINGLE string, not a list or array. Example: command="ls -la /app"'
                     
+
     try:
-        result = subprocess.run(
+        # Launch the subprocess asynchronously
+        process = await asyncio.create_subprocess_shell(
             command, 
-            shell=True, 
             cwd=SANDBOX_DIR,
-            stderr=subprocess.STDOUT,   # <--- MERGE ERRORS INTO STDOUT
-            stdout=subprocess.PIPE,     # <--- CAPTURE THE MERGED STREAM
-            text=True, 
-            timeout=timeout_seconds,
-            stdin=subprocess.DEVNULL,   # Prevents children from stealing the MCP input stream
-            start_new_session=True      # Traps grandchild daemons (like Playwright) in an isolated process group
+            stdout=asyncio.subprocess.PIPE,     # Capture stdout
+            stderr=asyncio.subprocess.STDOUT,   # Merge stderr into stdout
+            stdin=asyncio.subprocess.DEVNULL,   # Prevents children from stealing input stream
+            start_new_session=True              # Traps grandchild daemons in isolated process group
         )
 
-        output = result.stdout # Now contains everything (prints AND errors)
-        
+        try:
+            # Await the completion with an async timeout
+            stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+            
+        except asyncio.TimeoutError:
+            # If it times out, we must aggressively kill the entire process group
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass # Process already died natively
+                
+            return f"SYSTEM ERROR: Command timed out after {timeout_seconds} seconds and was forcefully terminated."
+
+        # Decode the byte stream safely
+        output = stdout_data.decode('utf-8', errors='replace') if stdout_data else ""
+
         # Preview + File Redirection Prompt ---
         if len(output) > 5000:
             preview = output[:1000] # Give it just enough to see the structure/headers
-            return (f"Exit Code: {result.returncode}\nOutput Preview (First 1000 chars):\n{preview}\n\n"
+            return (f"Exit Code: {process.returncode}\nOutput Preview (First 1000 chars):\n{preview}\n\n"
                     f"... [SYSTEM WARNING: The full output was over 5000 characters and has been truncated. "
                     f"Do NOT attempt to parse this preview. If you need the full data, run your command again "
                     f"and append `> filename.txt` to save it to a file. Then, write a Python tool to extract the specific info.]")
 
-        return f"Exit Code: {result.returncode}\nOutput:\n{output}"
+        return f"Exit Code: {process.returncode}\nOutput:\n{output}"
+        
     except Exception as e:
         return f"Error executing command: {str(e)}"
-
+        
 
 # --- MEMORY TOOLS ---
 @mcp.tool()
@@ -495,7 +511,7 @@ async def compress_and_store_context() -> str:
             "CRITICAL: The 'user' message MUST contain three distinct sections:\n"
             "1. 'Current State': A summary of what has been accomplished so far.\n"
             "2. 'Active Plan & Next Steps': Explicitly list the pending tasks, or the exact next action the Brain was about to take.\n"
-            "3. 'Pending User Input': Look at the very last message sent by the user before the compression. Copy it here exactly."
+            "3. 'Pending User Input': Summarize any REMAINING or UNANSWERED questions/requests from the user's last message. Do NOT include commands to 'compress context' or 'save memory', as those were just fulfilled."
         )},
         {"role": "user", "content": bloated_text}
     ]
@@ -518,7 +534,7 @@ async def compress_and_store_context() -> str:
         
         save_json(CURRENT_HISTORY_FILE, new_history)
         
-        return f"SUCCESS: Context compressed and old history moved to {os.path.basename(backup_file)}. \nNew detailed memories extracted to disk: {added_titles}. \n[SYSTEM INSTRUCTION: Your context has been reset. Review your 'Active Plan' ONLY if you previously created one. Otherwise, read your summarized Next Steps and proceed immediately.]"
+        return f"SUCCESS: Context compressed and old history moved to {os.path.basename(backup_file)}. \nNew detailed memories extracted to disk: {added_titles}. \n[SYSTEM INSTRUCTION: Your context has been reset, and any requested memory extraction has been completed. Review your 'Active Plan'. If the user's last command was simply to compress/save memory, do NOT do it again—simply tell them it is complete.]"
 
     except Exception as e:
         return f"FAILED during History Compression Phase. Error: {str(e)}"
@@ -535,7 +551,7 @@ async def forge_and_register_tool(category: str, category_description: str, tool
     safe_name = os.path.basename(tool_name)
     if safe_name.endswith('.py'):
         safe_name = safe_name[:-3]
-    safe_name = re.sub(r'[^a-zA-Z0-9_]', '', safe_name)
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', safe_name)
     if not safe_name:
         safe_name = "default_tool_name"
 
@@ -576,7 +592,7 @@ async def forge_and_register_tool(category: str, category_description: str, tool
                     raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
             
             # --- Robust Code Extraction ---
-            match = re.search(r"```python\n(.*?)\n```", raw_content, re.DOTALL)
+            match = re.search(r"```python[ \t]*\r?\n(.*?)\r?\n```", raw_content, re.DOTALL)
             if match:
                 code = match.group(1).strip()
             else:
@@ -592,8 +608,27 @@ async def forge_and_register_tool(category: str, category_description: str, tool
                 
             with open(file_path, "w") as f: 
                 f.write(code)
+
+            # --- Auto-Install Dependencies (Layered Delta Method) ---
+            requires_match = re.search(r"# REQUIRES:\s*(.*)", code, re.IGNORECASE)
+            deps_report = ""
+            if requires_match:
+                # Extract whatever the AI wrote
+                deps = requires_match.group(1).strip()
                 
-            check = subprocess.run(["python", "-m", "py_compile", filename], cwd=FORGED_TOOLS_DIR, capture_output=True, text=True)
+                # Sanitize the string (in case the AI wrote 'pip install' or 'pixi add')
+                clean_deps = deps.replace("pip install", "").replace("pixi add", "").strip()
+                
+                # Install directly into the Session's persistent delta folder
+                install_cmd = f"{sys.executable} -m pip install --target /app/workspace/custom_packages {clean_deps}"
+                
+                install_check = subprocess.run(install_cmd, shell=True, cwd=WORKSPACE_DIR, capture_output=True, text=True)
+                if install_check.returncode == 0:
+                    deps_report = f"\n[SYSTEM: Automatically installed '{clean_deps}' into persistent session delta.]"
+                else:
+                    deps_report = f"\n[SYSTEM WARNING: Failed to auto-install dependencies: {install_check.stderr}]"
+            
+            check = subprocess.run([sys.executable, "-m", "py_compile", filename], cwd=FORGED_TOOLS_DIR, capture_output=True, text=True)
             
             if check.returncode == 0:
                 registry = load_json(TOOL_REGISTRY_FILE)
@@ -613,6 +648,7 @@ async def forge_and_register_tool(category: str, category_description: str, tool
                 
                 report = f"SUCCESS (Attempt {attempt+1}): Tool '{tool_name}' forged in '{category}'.\n"
                 report += f"{token_report}\n"
+                report += deps_report
                 
                 report += f"Run via: execute_bash('pixi run python /app/workspace/forged_tools/{filename}')\n\n"
                 
