@@ -264,9 +264,10 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 		pixi project channel add bioconda && \
 		pixi add python pip openai mcp fastmcp \
 		pandas numpy scipy matplotlib pyarrow \
-		requests beautifulsoup4 lxml playwright \
+	    requests beautifulsoup4 lxml \
 		pypdf2 python-docx pillow tiktoken \
-		biopython rdkit sqlalchemy networkx
+		biopython rdkit sqlalchemy networkx && \
+		pixi add --pypi sqlite-vec playwright
 			
 	# PRE-FETCH BROWSER BINARIES
 	# This downloads the headless chromium binary into the agent's cache permanently

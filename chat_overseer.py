@@ -9,6 +9,7 @@ import traceback
 import logging
 import argparse
 import sys
+import atexit
 from datetime import datetime
 from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
@@ -168,6 +169,23 @@ def log_event(role, content, usage=None, thinking=None, text_color=None):
             if usage and usage.prompt_tokens is not None:
                 print(f"{COLOR_YELLOW}[Tokens: {usage.prompt_tokens} in | {usage.completion_tokens} out]{COLOR_RESET}")
 
+active_container_name = None
+
+def cleanup_container():
+    """Guarantees the container is killed when the python script exits."""
+    if active_container_name:
+        if config.CONSOLE_MODE != "silent":
+            print(f"\n\033[91m[SYSTEM] Tearing down container {active_container_name}...\033[0m")
+        subprocess.run(
+            f"podman rm -f {active_container_name}", 
+            shell=True, 
+            stderr=subprocess.DEVNULL, 
+            stdout=subprocess.DEVNULL
+        )
+
+# Register the cleanup function to run when the script dies
+atexit.register(cleanup_container)
+
 async def run_chat():
     banner = (
         f"Session: [{active_session}]\n"
@@ -190,13 +208,14 @@ async def run_chat():
 
     # THE SELF-HEALING CONNECTION LOOP
     while not quit_app:
-        container_name = f"forge_sandbox_{active_session}_{os.getpid()}"
+        global active_container_name
+        active_container_name = f"forge_sandbox_{active_session}_{os.getpid()}"
         # Clear stale Podman WSL state before every single boot/reboot ---
         if config.CONSOLE_MODE != "silent":
             print(f"{COLOR_DIM}Sweeping stale Podman state...{COLOR_RESET}")
 
         subprocess.run(
-            f"podman rm -f -i {container_name}",
+            f"podman rm -f -i {active_container_name}",
             #"podman system prune -f && podman rm -f $(podman ps -aq)",
             #"rm -rf ~/.podman-run/containers ~/.podman-run/libpod/tmp",
             shell=True, 
@@ -207,7 +226,7 @@ async def run_chat():
         try:
             # --- 1. DYNAMICALLY BUILD THE TARGET COMMAND ---
             # Start with the base command
-            god_tools_cmd = "pixi run --manifest-path /app/pixi.toml -q python /app/god_tools.py"
+            god_tools_cmd = "pixi run --locked --manifest-path /app/pixi.toml -q python /app/god_tools.py"
             
             # Append any CLI profile overrides that were provided
             if cli_args.coder is not None: god_tools_cmd += f" --coder {cli_args.coder}"
@@ -219,7 +238,8 @@ async def run_chat():
                 args=[
                     "--log-level=error",
                     "run", "-i", "--rm",
-                    f"--name={container_name}", # True unique identifier
+                    "--init",
+                    f"--name={active_container_name}", # True unique identifier
                     "--network=slirp4netns", # networking mode built specifically for rootless Podman
                     "--add-host=host.containers.internal:host-gateway",
                     "--security-opt=no-new-privileges:true", # Prevent privilege escalation

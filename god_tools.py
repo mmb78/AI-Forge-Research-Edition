@@ -8,9 +8,14 @@ import logging
 import re
 import sys
 import argparse
+import sqlite3
+import sqlite_vec
 from typing import Any
 from datetime import datetime
 from openai import AsyncOpenAI
+from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
+
 import config
 
 # --- HIDE FASTMCP INTERNAL LOGS BEFORE IMPORT ---
@@ -689,6 +694,98 @@ async def forge_and_register_tool(category: str, category_description: str, tool
             return f"Fatal API Error during forging attempt {attempt+1}.\nError: {str(e)}\n\nDetailed Traceback:\n{error_trace}"
             
     return f"FAILED: Coder LLM could not produce valid code after {config.MAX_FORGE_RETRIES} attempts."
+
+@mcp.tool()
+def query_sqlite_db(query: str, parameters: list = None) -> str:
+    """Executes a SQL query against the persistent SQLite database in the 'state' folder.
+    Supports standard SQL (CREATE, INSERT, SELECT, DELETE, etc.) AND Vector Search via sqlite-vec.
+    
+    If your query requires parameters (to prevent SQL injection or handle complex strings), 
+    pass them as a list in the 'parameters' argument.
+    """
+    db_path = os.path.join(STATE_DIR, "forge_database.db")
+    
+    try:
+        # Connect to the DB
+        conn = sqlite3.connect(db_path)
+        
+        # Load the vector extension into this connection
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        
+        cursor = conn.cursor()
+        
+        if parameters:
+            # Handle list parameters correctly for standard SQLite bindings
+            cursor.execute(query, parameters)
+        else:
+            cursor.execute(query)
+            
+        # If the query is meant to return data (SELECT or PRAGMA)
+        if query.strip().upper().startswith(("SELECT", "PRAGMA")):
+            # Extract column names for context
+            columns = [description[0] for description in cursor.description] if cursor.description else []
+            rows = cursor.fetchall()
+            
+            if not rows:
+                result_str = "Query executed successfully. 0 rows returned."
+            else:
+                # Zip columns and rows into a list of dictionaries for clean JSON output
+                data = [dict(zip(columns, row)) for row in rows]
+                result_str = json.dumps(data, indent=2)
+        else:
+            # For CREATE, INSERT, UPDATE, DELETE
+            rowcount = cursor.rowcount
+            result_str = f"Query executed successfully. Rows affected: {rowcount}"
+            
+        conn.commit()
+        conn.close()
+        return result_str
+        
+    except Exception as e:
+        return f"Database Error: {str(e)}"
+
+@mcp.tool()
+async def fetch_webpage(url: str) -> str:
+    """Fetches a webpage using a headless Chromium browser to render JavaScript, 
+    and returns ONLY the clean, readable text. 
+    Use this to read documentation, articles, or search results without writing a custom scraper.
+    """
+    try:
+        async with async_playwright() as p:
+            # Launch chromium natively in headless mode with container-safe flags
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
+            page = await browser.new_page()
+            
+            # Navigate and wait for the page to finish loading its network requests (JS rendering)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            
+            # Extract the raw HTML after JS has executed
+            html_content = await page.content()
+            await browser.close()
+            
+            # Use BeautifulSoup to aggressively strip out layout garbage
+            soup = BeautifulSoup(html_content, 'html.parser')
+            for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'header', 'meta', 'noscript', 'svg']):
+                tag.decompose()
+                
+            # Extract just the readable text
+            text = soup.get_text(separator='\n\n')
+            
+            # Clean up excessive newlines to protect the context window
+            clean_text = re.sub(r'\n\s*\n', '\n\n', text).strip()
+            
+            # Hard limit: Protect the LLM from massive pages
+            if len(clean_text) > 20000:
+                clean_text = clean_text[:20000] + "\n\n... [SYSTEM WARNING: Content truncated for length. Too much text.]"
+                
+            return f"--- CONTENT FROM {url} ---\n\n{clean_text}"
+            
+    except Exception as e:
+        return f"Failed to fetch {url}. Error: {str(e)}"
 
 if __name__ == "__main__":
     mcp.run()
