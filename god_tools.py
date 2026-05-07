@@ -7,9 +7,11 @@ import traceback
 import logging
 import re
 import sys
+import shutil
 import argparse
 import sqlite3
 import sqlite_vec
+import array
 from typing import Any
 from datetime import datetime
 from openai import AsyncOpenAI
@@ -85,6 +87,14 @@ universal_client = AsyncOpenAI(
     timeout=uni_config["timeout"]
 )
 
+# --- Initialize Embedding Client ---
+emb_config = config.EMBEDDING_CONFIG
+embedding_client = AsyncOpenAI(
+    base_url=emb_config["base_url"], 
+    api_key=emb_config["api_key"], 
+    timeout=emb_config["timeout"]
+)
+
 # --- HELPER FUNCTIONS ---
 def load_json(filepath):
     if not os.path.exists(filepath): return {}
@@ -108,6 +118,7 @@ def view_tool_registry(category: str = None) -> str:
             return json.dumps({category: registry[category]["tools"]}, indent=2)
         else:
             return f"Category '{category}' not found. Available categories are: {list(registry.keys())}"
+
 
 @mcp.tool()
 def manage_plan(action: str, content: str = None) -> str:
@@ -133,6 +144,7 @@ def manage_plan(action: str, content: str = None) -> str:
         
     else:
         return "Error: Invalid action. Must be 'read' or 'write'."
+
 
 @mcp.tool()
 async def consult_adviser(current_plan: str, encountered_problems: str) -> str:
@@ -336,6 +348,31 @@ async def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: in
         return f"Error executing command: {str(e)}"
         
 
+@mcp.tool()
+def write_file(filepath: str, content: str) -> str:
+    """Creates or overwrites a file with the provided content.
+    If the file already exists, it automatically creates a timestamped backup before overwriting.
+    Use this instead of bash 'echo' or 'cat' to write code, markdown, or text files safely.
+    """
+    try:
+        # Check if we are overwriting an existing file
+        if os.path.exists(filepath):
+            # Create a backup using your exact datetime idea!
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            backup_path = f"{filepath}.{timestamp}.bak"
+            shutil.copy2(filepath, backup_path)
+            backup_msg = f"(Old version backed up to {os.path.basename(backup_path)})"
+        else:
+            backup_msg = "(New file created)"
+            
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        return f"SUCCESS: File saved to {filepath} {backup_msg}"
+    except Exception as e:
+        return f"Error writing file: {str(e)}"
+
+
 # --- MEMORY TOOLS ---
 @mcp.tool()
 def view_memory_registry(category: str = None) -> str:
@@ -355,6 +392,7 @@ def view_memory_registry(category: str = None) -> str:
         return f"Memories in '{category}':\n{json.dumps(summary, indent=2)}\n\nUse read_memory with the exact title to read the full text."
     return f"Category not found. Available: {list(memories.keys())}"
 
+
 @mcp.tool()
 def read_memory(category: str, memory_title: str) -> str:
     """Reads the full markdown text of a specific memory from the registry."""
@@ -369,6 +407,7 @@ def read_memory(category: str, memory_title: str) -> str:
         return "Error: Memory or Category not found. Use view_memory_registry to see available options."
     except Exception as e:
         return f"Error reading memory file: {str(e)}"
+
 
 @mcp.tool()
 def store_memory(category: str, category_description: str, title: str, short_description: str, detailed_markdown: str) -> str:
@@ -396,6 +435,7 @@ def store_memory(category: str, category_description: str, title: str, short_des
     
     save_json(MEMORY_REGISTRY_FILE, memories)
     return f"SUCCESS: Memory '{title}' saved to category '{category}'."
+
 
 @mcp.tool()
 async def compress_and_store_context() -> str:
@@ -565,6 +605,7 @@ async def compress_and_store_context() -> str:
     except Exception as e:
         return f"FAILED during History Compression Phase. Error: {str(e)}"
 
+
 @mcp.tool()
 async def forge_and_register_tool(category: str, category_description: str, tool_name: str, tool_description: str, objective: str) -> str:
     """Delegates writing a Python script to the Coder LLM, and registers it with rich metadata.
@@ -695,46 +736,94 @@ async def forge_and_register_tool(category: str, category_description: str, tool
             
     return f"FAILED: Coder LLM could not produce valid code after {config.MAX_FORGE_RETRIES} attempts."
 
-@mcp.tool()
-def query_sqlite_db(query: str, parameters: list = None) -> str:
-    """Executes a SQL query against the persistent SQLite database in the 'state' folder.
-    Supports standard SQL (CREATE, INSERT, SELECT, DELETE, etc.) AND Vector Search via sqlite-vec.
+
+# 1. Build the dynamic description using the f-string outside the function
+db_tool_desc = f"""Executes a SQL query against a specified SQLite database.
     
-    If your query requires parameters (to prevent SQL injection or handle complex strings), 
-    pass them as a list in the 'parameters' argument.
-    """
-    db_path = os.path.join(STATE_DIR, "forge_database.db")
-    
+'db_path' MUST be an absolute path (e.g., '/app/workspace/state/my_db.db').
+If your query requires standard parameters, pass them as a list in 'parameters'.
+
+MAGIC VECTOR PIPELINE: If you provide a string in 'text_to_embed', the system will 
+silently generate its {config.EMBEDDING_CONFIG['dimensions']}-dimension vector and APPEND it to the end of your 'parameters' list.
+
+CRITICAL: Always use LIMIT in your SELECT queries (e.g., LIMIT 10) to protect your context window!
+
+Insert Example: 
+  query="INSERT INTO vec_table(rowid, embedding) VALUES (?, ?)"
+  parameters=[1]
+  text_to_embed="My document text"
+  
+Search Example:
+  query="SELECT rowid, distance FROM vec_table WHERE embedding MATCH ? ORDER BY distance LIMIT 5"
+  parameters=[]
+  text_to_embed="My search query"
+"""
+
+@mcp.tool(description=db_tool_desc)
+async def query_sqlite_db(db_path: str, query: str, parameters: list = None, text_to_embed: str = None) -> str:
     try:
-        # Connect to the DB
+        # --- Handle Magic Embedding Injection ---
+        if text_to_embed:
+            response = await universal_client.embeddings.create(
+                model=config.EMBEDDING_CONFIG["model"],
+                input=text_to_embed
+            )
+            embedding_vector = response.data[0].embedding
+            
+            # Failsafe dimension check
+            actual_dim = len(embedding_vector)
+            expected_dim = config.EMBEDDING_CONFIG["dimensions"]
+            if actual_dim != expected_dim:
+                return f"SYSTEM ERROR: The model returned a vector of {actual_dim} dimensions, but the system is configured for {expected_dim}. Please check config.py."
+            
+            # Pack it into a binary BLOB
+            vector_blob = array.array('f', embedding_vector).tobytes()
+            
+            if parameters is None:
+                parameters = []
+            
+            # Append the binary blob to the parameters list silently
+            parameters.append(vector_blob)
+
+        # --- Database Execution ---
         conn = sqlite3.connect(db_path)
-        
-        # Load the vector extension into this connection
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
+        
+        # Apply the Row Factory upgrade
+        conn.row_factory = sqlite3.Row
         
         cursor = conn.cursor()
         
         if parameters:
-            # Handle list parameters correctly for standard SQLite bindings
             cursor.execute(query, parameters)
         else:
             cursor.execute(query)
             
-        # If the query is meant to return data (SELECT or PRAGMA)
+        # --- Output Formatting & CONTEXT PROTECTION ---
         if query.strip().upper().startswith(("SELECT", "PRAGMA")):
-            # Extract column names for context
-            columns = [description[0] for description in cursor.description] if cursor.description else []
             rows = cursor.fetchall()
             
             if not rows:
                 result_str = "Query executed successfully. 0 rows returned."
             else:
-                # Zip columns and rows into a list of dictionaries for clean JSON output
-                data = [dict(zip(columns, row)) for row in rows]
+                # FAILSAFE 1: Hard limit on row count
+                MAX_ROWS = 50
+                warning_msg = ""
+                if len(rows) > MAX_ROWS:
+                    warning_msg = f"\n\n... [SYSTEM WARNING: The query returned {len(rows)} rows, but only the first {MAX_ROWS} are shown to protect your context window. Use SQL 'LIMIT' and 'OFFSET' to paginate.]"
+                    rows = rows[:MAX_ROWS]
+                
+                # Native, clean conversion to dictionaries
+                data = [dict(row) for row in rows]
                 result_str = json.dumps(data, indent=2)
+                
+                # FAILSAFE 2: Hard limit on character length (in case a single row has massive text)
+                if len(result_str) > 10000:
+                    result_str = result_str[:10000] + "\n\n... [SYSTEM WARNING: JSON output exceeded 10,000 characters and was truncated. Refine your SQL query to select fewer columns or specific rows.]"
+                else:
+                    result_str += warning_msg
         else:
-            # For CREATE, INSERT, UPDATE, DELETE
             rowcount = cursor.rowcount
             result_str = f"Query executed successfully. Rows affected: {rowcount}"
             
@@ -745,6 +834,7 @@ def query_sqlite_db(query: str, parameters: list = None) -> str:
     except Exception as e:
         return f"Database Error: {str(e)}"
 
+        
 @mcp.tool()
 async def fetch_webpage(url: str) -> str:
     """Fetches a webpage using a headless Chromium browser to render JavaScript, 

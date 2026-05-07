@@ -49,7 +49,6 @@ Save the file (Ctrl+O, Enter, Ctrl+X) and exit the terminal. Open a standard Win
     
 You will now automatically be logged in as the restricted `agent` user, trapped inside a secure, air-gapped Linux bubble. You are now ready to proceed to Step 1!
 
-
 ### 1. The Multi-Agent Architecture
 This project utilizes multiple distinct Large Language Models (LLMs) to maximize efficiency and accuracy:
 * **The Brain (The Overseer):** A fast, high-parameter reasoning model. It communicates with the user, plans out the necessary steps, and orchestrates the execution of tools.
@@ -79,11 +78,13 @@ The system utilizes AsyncOpenAI for fully asynchronous streaming across all agen
 To guarantee system stability, background agents (like the Summarizer) do not rely on standard prompting. They use OpenAI's native Structured Outputs (`"strict": True`). This enforces mathematical compliance at the API level, ensuring the AI cannot hallucinate a broken comma or invalid schema that would corrupt the `current_history.json` or registry files.
 
 ### 7. The "AI Scientist" Super-Suite
-To prevent the AI from reinventing the wheel with complex Python scripts, the sandbox natively includes powerful system-level binaries and hardware access:
+To prevent the AI from reinventing the wheel with complex Python scripts, the sandbox natively includes powerful system-level capabilities:
 * **Hardware Acceleration:** Native GPU passthrough (via NVIDIA CDI) allows the AI to dynamically install CUDA toolkits via Pixi and execute hardware-accelerated machine learning scripts.
+* **Native Vector Database (Context-Bypass Architecture):** Equipped with `sqlite3` and the C-based `sqlite-vec` extension. The framework uses a strict Two-Table relational schema to link metadata directly to high-speed vector tables. 
+  * *Zero Context Bloat:* When the Brain wants to insert or search semantic data, it simply passes a `text_to_embed` parameter to the SQL tool. The host proxy automatically routes the text to a local embedding model (e.g., Qwen 4096-dim), packs it into a binary BLOB, and injects it into the database. The massive floating-point arrays never touch the LLM's context window, drastically reducing token costs and preventing hallucination.
+* **Native Web Scraping:** Features a built-in `fetch_webpage` tool powered by headless Chromium and Playwright. It automatically renders JavaScript, bypasses basic bot protections, and strips HTML bloat, returning clean Markdown without the Brain writing a single line of scraper code.
 * **Massive Data Processing:** Equipped with `aria2c` for high-speed parallel downloads and `pigz`/`zstd` for instantaneous decompression of massive genomic/data payloads.
 * **Media & Documents:** Pre-loaded with `tesseract-ocr`, `poppler-utils` (for direct PDF extraction), and `ffmpeg`.
-* **Headless Browsing:** Includes `chromium` and `xvfb` for robust, headless web scraping and literature acquisition.
 * **Scientific Rendering & Reporting:** Uses `graphviz` to render complex networks and `pandoc` to compile the AI's markdown findings directly into HTML, Word, or scientific PDF formats.
 
 ### 8. Master Planning & Self-Correction
@@ -111,7 +112,8 @@ The Overseer natively supports multiple visual modes via the command line. Run i
 
 * **Non-Root Execution:** The AI runs as a restricted, non-root `agent` user inside the container. Podman handles UID mapping dynamically (via the `U` volume flag) to allow safe read/write access without root privileges.
 * **Stripped Capabilities & Resource Limits:** The container drops all Linux capabilities (`--cap-drop=ALL`) and strictly limits the AI to 4 CPUs, 16GB RAM, and a hard limit of 1000 PIDs (`--pids-limit=1000`) to instantly neutralize bash fork bombs and resource-exhaustion attacks.
-* **Stream Protection (Daemon Trapping):** The FastMCP server natively traps grandchild daemons (using `start_new_session=True` in subprocesses) and aggressively gags Python background logging. This ensures that complex Playwright scripts, stray warnings, or detached background servers never corrupt the JSON-RPC communication streams.
+* **Anti-Zombie Process Hooks:** The container boots with the `--init` flag to perfectly manage PID 1 signals, and the host Python script uses `atexit` hooks. Even if you hard-crash the script via `Ctrl+D`, all nested bash processes, headless browsers, and stray daemons are instantly and cleanly slaughtered.
+* **Stream Protection (Daemon Trapping):** The FastMCP server natively traps grandchild daemons (using `start_new_session=True` in subprocesses) and aggressively gags Python background logging. This ensures that stray warnings or detached background servers never corrupt the JSON-RPC communication streams.
 * **The I/O Airlock (Surgical Mounts):** The container cannot see your host filesystem. It communicates via strict bind mounts:
   * `/app/host_input`: Mapped to your local input folder. **Strictly Read-Only (ro)**. The AI cannot delete or corrupt your source data. You must manually drop files (e.g., CSVs, scripts, or documents) into this host folder before asking the AI to analyze them. 
   * `/app/workspace`: The unified execution directory mapped to the active `Session_ID` folder.
@@ -121,9 +123,11 @@ The Overseer natively supports multiple visual modes via the command line. Run i
   * `/state`: Contains the critical JSON registries, the master plan, adviser reports, and the live `current_history.json` file.
   * `/forged_tools`: Where the generated Python scripts live.
   * `/memories`: Where the detailed Markdown files live.
+  * `/archive`: The dedicated "Soft-Delete" trash bin.
 * **Zero-Trust Architecture:** The container contains absolutely NO sensitive data, API keys, or `.env` files. The AI uses hardcoded dummy keys (e.g., `sk-sandbox-fake-key`) and routes all requests to a local `host.containers.internal` gateway. Authentication and routing are securely handled by a LiteLLM proxy running safely on the Windows/WSL host, making credential theft mathematically impossible.
 * **Context Preservation (I/O Truncation):** If the AI executes a bash command that floods the terminal with thousands of lines, the system automatically intercepts and truncates the output at 5,000 characters. It warns the AI to gracefully redirect large data to files (`> output.txt`), preventing server crashes and context-window exhaustion.
 * **Network Isolation:** The container runs on an isolated bridge network (`slirp4netns`). It communicates with local/tunneled LLMs strictly via the `host.containers.internal` gateway.
+* **Anti-Deletion Protocol (Soft-Deletes):** The AI is strictly prompted against using destructive commands like `rm` or `DROP TABLE`. Instead, it is trained to use a robust "Soft-Delete" protocol. If it needs to rewrite a Python script or rebuild a database schema, it automatically uses the native `write_file` tool to create timestamped `.bak` copies, or uses bash `mv` to send old databases to the `/archive` folder. This provides a flawless audit trail and guarantees zero data loss during autonomous operations.
 
 ---
 
@@ -264,7 +268,7 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 		pixi project channel add bioconda && \
 		pixi add python pip openai mcp fastmcp \
 		pandas numpy scipy matplotlib pyarrow \
-	    requests beautifulsoup4 lxml \
+		requests beautifulsoup4 lxml \
 		pypdf2 python-docx pillow tiktoken \
 		biopython rdkit sqlalchemy networkx && \
 		pixi add --pypi sqlite-vec playwright
@@ -350,9 +354,7 @@ You can use `tmux` to launch a multi-agent swarm in a 2x2 split-pane dashboard. 
       select-layout tiled \; \
       attach-session -t forge_swarm
 
-**Pro-Tip for Swarm Management:** 
-Enable mouse support in your tmux configuration (`echo "set -g mouse on" >> ~/.tmux.conf`) so you can simply click between your agents, drag the window borders to resize their panels, and use your mouse wheel to independently scroll through their individual reasoning logs!
-
+**Pro-Tip for Swarm Management:** Enable mouse support in your tmux configuration (`echo "set -g mouse on" >> ~/.tmux.conf`) so you can simply click between your agents, drag the window borders to resize their panels, and use your mouse wheel to independently scroll through their individual reasoning logs!
 
 ## 📖 Monitoring & Logs
 

@@ -98,6 +98,7 @@ os.makedirs(f"{SESSION_DIR}/memories", exist_ok=True)
 os.makedirs(f"{SESSION_DIR}/state", exist_ok=True)
 os.makedirs(f"{SESSION_DIR}/sandbox", exist_ok=True)
 os.makedirs(f"{SESSION_DIR}/outputs", exist_ok=True)
+os.makedirs(f"{SESSION_DIR}/archive", exist_ok=True)
 
 # Build the isolated folder structure for input/output folders
 os.makedirs(config.HOST_INPUT_DIR, exist_ok=True)
@@ -525,6 +526,10 @@ async def run_chat():
                                             print(f"\n{COLOR_ORANGE}▶ Passing task to Coder... Awaiting response...{COLOR_RESET}")
                                         elif name == "compress_and_store_context":
                                             print(f"\n{COLOR_ORANGE}▶ Triggering Memory Manager Pipeline... Awaiting response...{COLOR_RESET}")
+                                        elif name == "consult_adviser":
+                                            print(f"\n{COLOR_ORANGE}▶ Consulting Senior Adviser... Awaiting strategic report...{COLOR_RESET}")
+                                        elif name == "query_universal_llm":
+                                            print(f"\n{COLOR_ORANGE}▶ Spawning Sub-Agent... Awaiting response...{COLOR_RESET}")
                                             
                                     start = time.time()
                                     result = await session.call_tool(name, args)
