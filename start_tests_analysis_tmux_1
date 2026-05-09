@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Kill the session if it already exists so we always start fresh
+tmux kill-session -t forge_swarm 2>/dev/null
+
+# Define the common analysis prompt as a variable to keep the script clean
+ANALYZE_PROMPT='Find the log file describing past AI agent activity (check file date to avoid looking at the log of your current interaction that is in the same folder). Use the Analyst to generate a summary of this interaction, which should include errors that were encountered and description of tasks that took long time to achieve or were stuck in loops. Read the summary from the Analyst and write your interpretation into a markdown formatted file. Then take the summary and append the code of the AI agent (/app/god_tools.py, /app/chat_overseer.py, and /app/config.py), send it to the Analyst and ask for suggestions for how to improve those Python scripts to avoid the issues. Do not try to just get a new code but rather detailed list of suggestions for improvements with explanations. If you need to, plan, forge new tools, run code, explore your environment, ask Adviser or use the Analyst to check your findings multiple times.'
+
+# 1. Create a new detached tmux session named "forge_swarm"
+tmux new-session -d -s forge_swarm
+
+# 2. Pane 0 (Top-Left): Agent 1 in Text Mode
+tmux send-keys -t forge_swarm "pixi run python chat_overseer.py -x -f formatted -s 'Agent_1' -p 'What tools do you have? What tools could you build? Brainstorm with adviser to know what your options are. Store titles and detailed descriptions of existing tools as well as tools you could make in a database, include embeddings of the descriptions for semantic search. What out of those tools would be the most similar to a word \"research\"? Write the outcome to a markdown formatted file.' ; echo -e '\n--- TEST COMPLETE, STARTING ANALYSIS ---' ; pixi run python chat_overseer.py -x -f formatted -s 'Agent_1' -p '${ANALYZE_PROMPT}'" C-m
+
+# 3. Pane 1 (Top-Right): Agent 2 in Text Mode
+tmux split-window -h -t forge_swarm
+tmux send-keys -t forge_swarm "pixi run python chat_overseer.py -x -f formatted -s 'Agent_2' -p 'Ask the Adviser for ideas for how to generate a table with current weather at 50 random GPS locations on the planet. Execute the plan, collect data and write a report to a markdown formatted file. Describe the tools you had to forge.' ; echo -e '\n--- TEST COMPLETE, STARTING ANALYSIS ---' ; pixi run python chat_overseer.py -x -f formatted -s 'Agent_2' -p '${ANALYZE_PROMPT}'" C-m
+
+# 4. Pane 2 (Bottom-Left): Agent 3 in MD Mode (Splits the top-left pane)
+tmux split-window -v -t forge_swarm:0.0
+tmux send-keys -t forge_swarm "pixi run python chat_overseer.py -x -f formatted -s 'Agent_3' -p 'What are the files and folders available in your environment? Make a plan how to explore the system in detail. Ask the Adviser for ideas how to improve your plan and get additional tests of the security of the environment and its potential vulnerabilities. Use tools that are at your disposal, or forge new tools, to make your work comprehensive and careful. Write a detailed summary and recommendations for how to improve security of this system.'; echo -e '\n--- TEST COMPLETE, STARTING ANALYSIS ---' ; pixi run python chat_overseer.py -x -f formatted -s 'Agent_3' -p '${ANALYZE_PROMPT}'" C-m
+
+# 5. Pane 3 (Bottom-Right): Agent 4 in MD Mode (Splits the top-right pane)
+tmux split-window -v -t forge_swarm:0.2
+tmux send-keys -t forge_swarm "pixi run python chat_overseer.py -x -f formatted -s 'Agent_4' -p 'What is the T6SS? Read wiki and search the web. Make a plan for finding 30 most recent papers in the T6SS field. Store their titles and abstracts into a database (no embedding needed). By full-text search, find the papers that mention \"effector\" in their abstract. Save the titles and abstracts to a markdown formatted file. Summarize findings of those papers.' ; echo -e '\n--- TEST COMPLETE, STARTING ANALYSIS ---' ; pixi run python chat_overseer.py -x -f formatted -s 'Agent_4' -p '${ANALYZE_PROMPT}'" C-m
+
+# 6. Balance the panes into a perfect 2x2 grid
+tmux select-layout -t forge_swarm tiled
+
+# 7. Attach to watch your swarm wake up!
+tmux attach-session -t forge_swarm

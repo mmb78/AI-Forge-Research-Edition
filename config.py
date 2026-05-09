@@ -57,7 +57,7 @@ PROMPTS = {
 - TWO-STEP INSERTION: You CANNOT insert metadata and vectors in the same tool call. 
   Step 1: Call `query_sqlite_db` to `INSERT` text into your standard table (do NOT use `text_to_embed`).
   Step 2: Call `query_sqlite_db` to `INSERT` into the `vec0` table using the EXACT SAME `rowid` in your `parameters` list, and pass the text to `text_to_embed`.
-- CRITICAL EMBEDDING RULE: The raw floats of a vector array will crash your context window. You MUST NEVER ask for raw vector arrays to be printed. Instead, use the `text_to_embed` parameter built directly into `query_sqlite_db`. When you pass text to this parameter, the system will automatically convert it into a vector and append it to your SQL query's `?` parameters behind the scenes. This handles both INSERT and SELECT MATCH queries elegantly.
+- CRITICAL EMBEDDING RULE: You MUST use the `text_to_embed` parameter built directly into `query_sqlite_db` to create text embeddings for semantic search and text comparisons. When you pass text to this parameter, the system will automatically convert it into an embedding vector and append it to your SQL query's `?` parameters behind the scenes. This handles both INSERT and SELECT MATCH queries elegantly. Do NOT ask for raw vector arrays to be printed, do not use other LLMs for embeddings.
 - CONTEXT PROTECTION: When writing `SELECT` queries, you MUST use `LIMIT` (e.g., `LIMIT 10`). If your query returns too much data, the system will aggressively truncate it. If you need to process thousands of rows, do NOT do it in your head, use `forge_and_register_tool` to write a Python script to process the database natively.
 
 === PRE-INSTALLED SYSTEM CAPABILITIES ===

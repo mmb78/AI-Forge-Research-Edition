@@ -315,10 +315,12 @@ async def query_universal_llm(
 @mcp.tool()
 async def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: int = 60) -> str:
     """Executes a bash command STRICTLY inside the sandbox directory. 
-    'timeout_seconds' defaults to 60. Increase it up to 600 if you expect a long-running process like a massive download."""
+    'timeout_seconds' defaults to 60. Increase it up to 600 if you expect a long-running process like a massive download.
+    Do NOT use destructive commands! Move files to the archive folder instead."""
     
     # 1. Block Destructive Commands
-    destructive_patterns = ["rm -rf", "rm -r", "rm ", "mv /app/workspace /", "> /dev/null"]
+#    destructive_patterns = ["rm -rf", "rm -r", "rm ", "mv /app/workspace /", "> /dev/null"]
+    destructive_patterns = ["rm -rf", "rm -r", "rm "]
     if any(pattern in command.lower() for pattern in destructive_patterns):
         return "SYSTEM ERROR: Destructive commands (rm) are blocked. Use the archive folder instead."
 
@@ -331,7 +333,6 @@ async def execute_bash(command: Any = None, cmd: Any = None, timeout_seconds: in
     # 3. Catch if it used a list/array instead of a string
     if not isinstance(command, str):
         return 'SYSTEM ERROR: The "command" parameter must be a SINGLE string, not a list or array. Example: command="ls -la /app"'
-                    
 
     try:
         # Launch the subprocess asynchronously
