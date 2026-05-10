@@ -2,7 +2,7 @@ FROM ghcr.io/prefix-dev/pixi:latest
 
 # ROOT LEVEL: Install system-level scientific & media dependencies
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    chromium xvfb git git-lfs curl wget unzip aria2 file jq pigz zstd \
+    xvfb git git-lfs curl wget unzip aria2 file jq pigz zstd \
     poppler-utils tesseract-ocr ffmpeg imagemagick graphviz pandoc sqlite3 \
     build-essential cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -20,6 +20,7 @@ RUN mkdir /app/workspace && chown -R agent:agent /app
 USER agent
 
 # We add conda-forge and bioconda to give the AI maximum scientific reach
+# Chained the Playwright install and cache cleanup into a single layer to minimize final image size.
 RUN pixi init && \
     pixi project channel add conda-forge && \
     pixi project channel add bioconda && \
@@ -28,8 +29,6 @@ RUN pixi init && \
     requests beautifulsoup4 lxml \
     pypdf2 python-docx pillow tiktoken \
     biopython rdkit sqlalchemy networkx && \
-	pixi add --pypi sqlite-vec playwright
-		
-# PRE-FETCH BROWSER BINARIES
-# This downloads the headless chromium binary into the agent's cache permanently
-RUN pixi run playwright install chromium
+	pixi add --pypi sqlite-vec playwright playwright-stealth && \
+    pixi run playwright install chromium && \
+    rm -rf ~/.cache/rattler ~/.cache/pip

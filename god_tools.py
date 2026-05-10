@@ -20,6 +20,7 @@ from typing import Any
 from datetime import datetime
 from openai import AsyncOpenAI
 from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 from bs4 import BeautifulSoup
 
 import tiktoken
@@ -55,7 +56,6 @@ mcp = FastMCP("TheForge")
 
 # --- MCP STREAM PROTECTION & LOGGING ---
 # Suppress stdout logging to protect FastMCP, but route logs to a file for debugging
-import logging
 log_file_path = "/app/workspace/logs/container_debug.log"
 
 logging.basicConfig(
@@ -125,7 +125,16 @@ def load_json(filepath):
     with open(filepath, "r") as f: return json.load(f)
 
 def save_json(filepath, data):
-    with open(filepath, "w") as f: json.dump(data, f, indent=4)
+    """Saves JSON using an atomic write to prevent corruption on crash."""
+    temp_path = f"{filepath}.tmp"
+    
+    # 1. Write to a temporary file first
+    with open(temp_path, "w", encoding="utf-8") as f: 
+        json.dump(data, f, indent=4)
+        
+    # 2. Atomically swap it with the real file
+    # If the system crashes during step 1, the original file is untouched!
+    os.replace(temp_path, filepath)
 
 def get_payload_tokens(messages):
     """Accurately counts text tokens and adds a safe mathematical buffer for images."""
@@ -276,6 +285,7 @@ async def query_universal_llm(
     If action is 'list_models', it returns the names of all available models. No other arguments are needed.
     If action is 'chat', you MUST provide 'model' and 'user_prompt'. 
     You may optionally tune 'system_prompt', 'temperature' (0.0 - 2.0), 'top_p', 'max_tokens', and 'reasoning_effort' ('low', 'medium', 'high' for supported reasoning models).
+    Use this only if the Analyst or the Adviser fail to answer questions or run out of ideas.
     """
     
     if action == "list_models":
@@ -933,103 +943,95 @@ async def forge_and_register_tool(category: str, category_description: str, tool
     return f"FAILED: Coder LLM could not produce valid code after {config.MAX_FORGE_RETRIES} attempts."
 
 
-# 1. Build the dynamic description using the f-string outside the function
 db_tool_desc = f"""Executes a SQL query against a specified SQLite database.
-    
 'db_path' MUST be an absolute path (e.g., '/app/workspace/state/my_db.db').
-If your query requires standard parameters, pass them as a list in 'parameters'.
 
 CRITICAL RULES:
-- Always use LIMIT in your SELECT queries (e.g., LIMIT 10) to protect your context window!
-- You can ONLY execute ONE statement per tool call! Do NOT chain statements with semicolons (e.g., no `CREATE TABLE...; CREATE TABLE...;`). Call the tool twice instead.
+- CONTEXT: Always use LIMIT in your SELECT queries (e.g., LIMIT 10) to protect your context window!
+- MULTIPLE STATEMENTS: To execute multiple schema creation commands at once, you may chain them with semicolons.
+- BULK INSERTS: To insert multiple rows efficiently, write a single parameterized INSERT statement and pass a LIST OF LISTS to 'parameters'. The system will automatically use batch execution (executemany).
 
-MAGIC VECTOR PIPELINE: If you provide a string in 'text_to_embed', the system will 
-silently generate its {config.EMBEDDING_CONFIG['dimensions']}-dimension vector and APPEND it to the end of your 'parameters' list.
-
-TWO-STEP INSERT: You CANNOT insert standard text and vectors in the same query! 
-Step 1: Insert metadata -> query="INSERT INTO docs(id, text) VALUES (?, ?)", parameters=[1, "My text"], text_to_embed=None
-Step 2: Insert vector -> query="INSERT INTO docs_vec(rowid, embedding) VALUES (?, ?)", parameters=[1], text_to_embed="My text"
-  
-SEARCH SYNTAX: sqlite-vec requires the LIMIT to be applied directly to the vector table. If you want to return text metadata alongside the distance, you MUST wrap the MATCH query in a subquery like this:
+SEMANTIC SEARCH: If you provide a string in 'search_text_to_embed', the system will automatically generate its vector and append it to the end of your 'parameters' list. 
+Search Syntax Example:
   query="SELECT m.*, v.distance FROM (SELECT rowid, distance FROM docs_vec WHERE embedding MATCH ? ORDER BY distance LIMIT 5) v JOIN docs m ON v.rowid = m.id"
   parameters=[]
-  text_to_embed="My search query"
+  search_text_to_embed="My search query"
 """
 
 @mcp.tool(description=db_tool_desc)
-async def query_sqlite_db(db_path: str, query: str, parameters: list = None, text_to_embed: str = None) -> str:
+async def query_sqlite_db(db_path: str, query: str, parameters: list = None, search_text_to_embed: str = None) -> str:
     try:
-        # --- Handle Magic Embedding Injection ---
-        if text_to_embed:
+        # --- Handle Search Embedding Injection ---
+        if search_text_to_embed:
             response = await universal_client.embeddings.create(
                 model=config.EMBEDDING_CONFIG["model"],
-                input=text_to_embed
+                input=search_text_to_embed
             )
             embedding_vector = response.data[0].embedding
-            
-            # Failsafe dimension check
-            actual_dim = len(embedding_vector)
-            expected_dim = config.EMBEDDING_CONFIG["dimensions"]
-            if actual_dim != expected_dim:
-                return f"SYSTEM ERROR: The model returned a vector of {actual_dim} dimensions, but the system is configured for {expected_dim}. Please check config.py."
-            
-            # Pack it into a binary BLOB
             vector_blob = array.array('f', embedding_vector).tobytes()
             
             if parameters is None:
                 parameters = []
-            
-            # Append the binary blob to the parameters list silently
+            if len(parameters) > 0 and isinstance(parameters[0], list):
+                return "SYSTEM ERROR: You cannot use 'search_text_to_embed' simultaneously with bulk (list of lists) parameters."
             parameters.append(vector_blob)
         
         upper_query = query.strip().upper()
         if upper_query.startswith("DROP TABLE") or upper_query.startswith("DELETE FROM"):
-            return "SYSTEM ERROR: 'DROP TABLE' and 'DELETE FROM' are disabled for safety. To 'delete' data, use an 'is_archived' boolean column, or rename the table using ALTER."
+            return "SYSTEM ERROR: 'DROP TABLE' and 'DELETE FROM' are disabled for safety. To 'delete' data, rename the table using ALTER."
         
         # --- Database Execution ---
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
-        
-        # Apply the Row Factory upgrade
         conn.row_factory = sqlite3.Row
-        
         cursor = conn.cursor()
         
+        is_bulk_operation = False
+        
         if parameters:
-            cursor.execute(query, parameters)
+            # Detect Bulk Insert (List of Lists)
+            if len(parameters) > 0 and isinstance(parameters[0], list):
+                cursor.executemany(query, parameters)
+                is_bulk_operation = True
+            else:
+                cursor.execute(query, parameters)
         else:
-            cursor.execute(query)
+            try:
+                cursor.execute(query)
+            except Exception as e:
+                # Catch multi-statement attempts and cleanly route them to executescript
+                if "one statement at a time" in str(e).lower() or "can only execute one statement" in str(e).lower():
+                    cursor.executescript(query)
+                    is_bulk_operation = True
+                else:
+                    raise e
             
         # --- Output Formatting & CONTEXT PROTECTION ---
-        if cursor.description: # True if the query actually returns data (catches CTEs safely)
+        if is_bulk_operation or cursor.description is None:
+            # executescript and executemany don't return fetchable rows
+            rowcount = cursor.rowcount
+            result_str = f"Operation executed successfully. Rows affected/processed: {rowcount}"
+        else:
             rows = cursor.fetchall()
-            
             if not rows:
                 result_str = "Query executed successfully. 0 rows returned."
             else:
-                # FAILSAFE 1: Hard limit on row count
                 MAX_ROWS = 50
                 warning_msg = ""
                 if len(rows) > MAX_ROWS:
-                    warning_msg = f"\n\n... [SYSTEM WARNING: The query returned {len(rows)} rows, but only the first {MAX_ROWS} are shown to protect your context window. Use SQL 'LIMIT' and 'OFFSET' to paginate.]"
+                    warning_msg = f"\n\n... [SYSTEM WARNING: The query returned {len(rows)} rows, but only the first {MAX_ROWS} are shown to protect context. Use 'LIMIT' to paginate.]"
                     rows = rows[:MAX_ROWS]
                 
-                # Native, clean conversion to dictionaries
                 data = [dict(row) for row in rows]
-                # default=str safely casts sqlite-vec BLOBs/bytes into strings so JSON doesn't crash
                 result_str = json.dumps(data, indent=2, default=str)
                 
-                # FAILSAFE 2: Hard limit on character length (in case a single row has massive text)
                 if len(result_str) > 20000:
-                    result_str = result_str[:20000] + "\n\n... [SYSTEM WARNING: JSON output exceeded 20,000 characters and was truncated. Refine your SQL query to select fewer columns or specific rows.]"
+                    result_str = result_str[:20000] + "\n\n... [SYSTEM WARNING: JSON output exceeded 20,000 characters and was truncated. Refine your SQL query.]"
                 else:
                     result_str += warning_msg
-        else:
-            rowcount = cursor.rowcount
-            result_str = f"Query executed successfully. Rows affected: {rowcount}"
-            
+                    
         conn.commit()
         conn.close()
         return result_str
@@ -1037,7 +1039,128 @@ async def query_sqlite_db(db_path: str, query: str, parameters: list = None, tex
     except Exception as e:
         return f"SYSTEM ERROR: Database Exception: {str(e)}"
 
+
+@mcp.tool()
+async def batch_generate_embeddings(db_path: str, vec_table: str, rowids: list[int], texts_to_embed: list[str]) -> str:
+    """
+    Generates vector embeddings in bulk and inserts them into a vec0 virtual table.
+    Use this AFTER you have already inserted your data into a standard SQLite metadata table.
+    You must provide a list of 'rowids' (from your metadata table) and a perfectly matching list of 'texts_to_embed'.
+    """
+    if not rowids or not texts_to_embed:
+        return "SYSTEM ERROR: The lists cannot be empty."
         
+    if len(rowids) != len(texts_to_embed):
+        return f"SYSTEM ERROR: Mismatch! You provided {len(rowids)} rowids but {len(texts_to_embed)} texts."
+        
+    try:
+        # 1. Generate ALL embeddings in a single lightning-fast API call
+        response = await universal_client.embeddings.create(
+            model=config.EMBEDDING_CONFIG["model"],
+            input=texts_to_embed
+        )
+        
+        # 2. Connect to the SQLite database
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        cursor = conn.cursor()
+        
+        inserted_count = 0
+        
+        # 3. Insert ONLY into the vec_table
+        for i, rowid in enumerate(rowids):
+            embedding_vector = response.data[i].embedding
+            vector_blob = array.array('f', embedding_vector).tobytes()
+            
+            # Insert the vector using the provided rowid to link them
+            cursor.execute(f"INSERT INTO {vec_table}(rowid, embedding) VALUES (?, ?)", (rowid, vector_blob))
+            inserted_count += 1
+            
+        conn.commit()
+        conn.close()
+        
+        return f"SUCCESS: Batch processed {inserted_count} embeddings and inserted them into {vec_table}."
+        
+    except Exception as e:
+        return f"SYSTEM ERROR: Batch Embedding Failed. {str(e)}"
+        
+
+@mcp.tool()
+async def search_web(query: str, max_results: int = 5) -> str:
+    """Searches the web using a stealth browser to find relevant URLs and snippets.
+    ALWAYS use this tool first to find factual URLs before using fetch_webpage.
+    Do NOT guess or fabricate URLs.
+    """
+    # We use DuckDuckGo's legacy HTML page because it lacks advanced JS bot-detection
+    url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+    
+    try:
+        # Spin up the exact same stealth browser you use for fetch_webpage
+        async with Stealth().use_async(async_playwright()) as p:
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled' 
+                ]
+            )
+            
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US"
+            )
+            
+            page = await context.new_page()
+            
+            # Navigate to the search page
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            html_content = await page.content()
+            await browser.close()
+            
+        # Parse the raw HTML using BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+        results = soup.find_all('div', class_='result')
+        
+        if not results:
+            return f"SYSTEM ERROR: No results found for '{query}'. The stealth browser may have been served a Captcha."
+            
+        formatted_results = f"--- SEARCH RESULTS FOR '{query}' ---\n\n"
+        count = 0
+        
+        for row in results:
+            if count >= max_results:
+                break
+                
+            title_tag = row.find('a', class_='result__a')
+            snippet_tag = row.find('a', class_='result__snippet')
+            url_tag = row.find('a', class_='result__url')
+            
+            if title_tag and snippet_tag and url_tag:
+                title = title_tag.text.strip()
+                snippet = snippet_tag.text.strip()
+                
+                # The visual URL text is usually cleaner than the href redirect link
+                actual_url = url_tag.text.strip()
+                if not actual_url.startswith("http"):
+                    actual_url = "https://" + actual_url
+                    
+                formatted_results += f"{count+1}. {title}\nURL: {actual_url}\nSnippet: {snippet}\n\n"
+                count += 1
+                
+        if count == 0:
+            return f"SYSTEM ERROR: Could not extract valid links from the search page."
+            
+        return formatted_results
+
+    except Exception as e:
+        return f"SYSTEM ERROR: Stealth search failed. {str(e)}"
+
+
 @mcp.tool()
 async def fetch_webpage(url: str) -> str:
     """Fetches a webpage using a headless Chromium browser to render JavaScript, 
@@ -1045,17 +1168,31 @@ async def fetch_webpage(url: str) -> str:
     Use this to read documentation, articles, or search results without writing a custom scraper.
     """
     try:
-        async with async_playwright() as p:
+        async with Stealth().use_async(async_playwright()) as p:
             # Launch chromium natively in headless mode with container-safe flags
             browser = await p.chromium.launch(
                 headless=True, 
-                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled' 
+                ]
             )
-            page = await browser.new_page()
             
+            # Spoof a realistic Windows Chrome browser
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+                timezone_id="America/New_York"
+            )
+            
+            page = await context.new_page()
+                        
             # Navigate and wait for the page to finish loading its network requests (JS rendering)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            
+                        
             # Extract the raw HTML after JS has executed
             html_content = await page.content()
             await browser.close()

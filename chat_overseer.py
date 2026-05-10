@@ -127,16 +127,21 @@ def load_history():
     with open(CURRENT_HISTORY_FILE, "r") as f: return json.load(f)
 
 def save_history(messages):
-    """Saves the active history. Strips thinking tokens."""
+    """Saves the active history. Strips thinking tokens using atomic writes."""
     clean_messages = []
     for msg in messages:
         clean_msg = copy.deepcopy(msg)
         clean_msg.pop("reasoning_content", None)
         clean_messages.append(clean_msg)
         
-    with open(CURRENT_HISTORY_FILE, "w") as f: 
+    # 1. Write to a temporary file
+    temp_path = f"{CURRENT_HISTORY_FILE}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f: 
         json.dump(clean_messages, f, indent=4)
-
+        
+    # 2. Atomically swap it
+    os.replace(temp_path, CURRENT_HISTORY_FILE)
+    
 def estimate_tokens(messages):
     """Uses tiktoken for highly accurate estimation when the API receipt is voided."""
     total_text = ""

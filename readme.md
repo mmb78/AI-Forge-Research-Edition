@@ -82,9 +82,9 @@ To guarantee system stability, background agents (like the Summarizer) do not re
 ### 7. The "AI Scientist" Super-Suite
 To prevent the AI from reinventing the wheel with complex Python scripts, the sandbox natively includes powerful system-level capabilities:
 * **Hardware Acceleration:** Native GPU passthrough (via NVIDIA CDI) allows the AI to dynamically install CUDA toolkits via Pixi and execute hardware-accelerated machine learning scripts.
-* **Native Vector Database (Context-Bypass Architecture):** Equipped with `sqlite3` and the C-based `sqlite-vec` extension. The framework uses a strict Two-Table relational schema to link metadata directly to high-speed vector tables. 
-  * *Zero Context Bloat:* When the Brain wants to insert or search semantic data, it simply passes a `text_to_embed` parameter to the SQL tool. The host proxy automatically routes the text to a local embedding model (e.g., Qwen 4096-dim), packs it into a binary BLOB, and injects it into the database. The massive floating-point arrays never touch the LLM's context window, drastically reducing token costs and preventing hallucination.
-* **Native Web Scraping:** Features a built-in `fetch_webpage` tool powered by headless Chromium and Playwright. It automatically renders JavaScript, bypasses basic bot protections, and strips HTML bloat, returning clean Markdown without the Brain writing a single line of scraper code.
+* **Native Vector Database (Context-Bypass Architecture):** Equipped with `sqlite3` and the C-based `sqlite-vec` extension. The framework uses a strict Two-Table relational schema to link metadata directly to high-speed vector tables.
+* *Zero Context Bloat:* The framework uses dedicated tools to shield the LLM from massive vector arrays. To ingest bulk data, the Brain uses the `batch_generate_embeddings` tool, which generates embeddings and natively injects them into the two-table schema in milliseconds. To query the database, it passes a `search_text_to_embed` parameter to the SQL tool. The massive floating-point arrays never touch the LLM's context window, drastically reducing token costs and preventing hallucination.
+* **Zero-Cost Web Search & Stealth Scraping:** The framework is natively routing queries through a headless Chromium browser. By patching the browser with **Playwright-Stealth** and querying legacy HTML search portals, the AI visually scrapes live search results and reads articles as a spoofed human user, effortlessly bypassing Cloudflare, API shadow-bans, and WAF bot-protections.
 * **Native Multi-Modal Vision (VLM Support):** The framework isn't just limited to text. By pointing the Analyst profile to a local Vision-Language Model (like LLaVA or Qwen-VL), the AI framework can "see." The Brain can autonomously ask the Analyst to review generated charts, describe UI screenshots, or read scanned documents, fully integrating visual feedback into its reasoning loop.
 * **Context-Isolation Pattern:** Large files (codebases, logs, datasets) are strictly airlocked away from the Overseer's working memory. Through the `analyze_files` tool, the system utilizes a delegator pattern where heavy read-operations are offloaded to the Analyst, completely eliminating the "Context Blowout" problem common in standard LLM agents.
 * **Massive Data Processing:** Equipped with `aria2c` for high-speed parallel downloads and `pigz`/`zstd` for instantaneous decompression of massive genomic/data payloads.
@@ -98,7 +98,7 @@ To prevent the Brain from getting lost in the weeds of complex multi-step tasks,
 
 ### 9. Intelligent Loop Detection & Circuit Breakers
 To prevent the AI from burning tokens in infinite error loops, the Overseer utilizes two distinct failsafes:
-* **The Micro-Breaker (Failure Streaks):** The script tracks consecutive errors per tool. If the AI goes "blind" and fails to use the exact same tool 3 times in a row, the system forcefully intercepts the prompt with a [CRITICAL SYSTEM ALERT], snapping the AI out of its apology loop and commanding it to pivot its strategy.
+* **The Micro-Breaker (Failure Streaks):** The script tracks consecutive errors per tool. If the AI goes "blind" and fails to use the exact same tool 5 times in a row, the system forcefully intercepts the prompt with a [CRITICAL SYSTEM ALERT], snapping the AI out of its apology loop and commanding it to pivot its strategy.
 * **The Macro-Breaker (Runaway Trains):** The script tracks uninterrupted tool chains. Every 100 tool calls, it triggers a "Soft Pause" by injecting a system prompt that forces the Brain to self-evaluate. If the AI hits 300 consecutive tool chains, the system executes a "Hard Stop," forcing the AI to await human intervention.
  
 ### 10. Perfect Temporal Awareness (The Live Clock)
@@ -255,7 +255,7 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 
 	# ROOT LEVEL: Install system-level scientific & media dependencies
 	RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-		chromium xvfb git git-lfs curl wget unzip aria2 file jq pigz zstd \
+		xvfb git git-lfs curl wget unzip aria2 file jq pigz zstd \
 		poppler-utils tesseract-ocr ffmpeg imagemagick graphviz pandoc sqlite3 \
 		build-essential cmake gfortran libgl1 libglib2.0-0 libxml2-dev libxslt-dev \
 		&& rm -rf /var/lib/apt/lists/*
@@ -273,6 +273,7 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 	USER agent
 
 	# We add conda-forge and bioconda to give the AI maximum scientific reach
+	# Chained the Playwright install and cache cleanup into a single layer to minimize final image size.
 	RUN pixi init && \
 		pixi project channel add conda-forge && \
 		pixi project channel add bioconda && \
@@ -281,11 +282,10 @@ Create a file named `Containerfile` in your workspace root. Notice that it conta
 		requests beautifulsoup4 lxml \
 		pypdf2 python-docx pillow tiktoken \
 		biopython rdkit sqlalchemy networkx && \
-		pixi add --pypi sqlite-vec playwright
-			
-	# PRE-FETCH BROWSER BINARIES
-	# This downloads the headless chromium binary into the agent's cache permanently
-	RUN pixi run playwright install chromium
+		pixi add --pypi sqlite-vec playwright playwright-stealth && \
+		pixi run playwright install chromium && \
+		rm -rf ~/.cache/rattler ~/.cache/pip
+	
 
 Build the rootless image by running:
 
@@ -374,3 +374,7 @@ You can use `tmux` to launch a multi-agent swarm in a 2x2 split-pane dashboard. 
 Every interaction is mirrored to a timestamped log file inside your active session folder (e.g., `sessions/Session_ID_.../logs/`). This includes the Brain's reasoning tokens, tool payloads, and the Coder's intercepted internal thoughts which are hidden from the Brain to save context space.
 
 You can safely type `/exit` or `quit` at any time to shut down the system and instantly destroy the temporary container.
+
+
+### ⚠️ Disclaimer: Web Scraping & API Limits
+The default web search tool in this framework utilizes Playwright to scrape DuckDuckGo's legacy HTML portal. This is provided for **educational and research purposes only**. Actively bypassing bot protections or aggressively scraping search engines may violate their Terms of Service. If you intend to use this framework for heavy, production-grade autonomous research, you have to replace the `search_web` tool with an official API like Serper.dev, Tavily, or the Google Custom Search API to ensure stability and compliance. The author assumes no liability for IP bans or ToS violations incurred by using this code.
