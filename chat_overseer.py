@@ -42,6 +42,7 @@ parser.add_argument("--coder", type=int, help="Coder LLM profile index")
 parser.add_argument("--summarizer", type=int, help="Summarizer LLM profile index")
 parser.add_argument("--adviser", type=int, help="Adviser LLM profile index")
 parser.add_argument("--analyst", type=int, help="Analyst LLM profile index")
+parser.add_argument("--architect", type=int, help="Architect LLM profile index")
 
 cli_args = parser.parse_args()
 
@@ -54,6 +55,7 @@ if cli_args.coder is not None: config.ACTIVE_CODER_PROFILE = cli_args.coder
 if cli_args.summarizer is not None: config.ACTIVE_SUMMARIZER_PROFILE = cli_args.summarizer
 if cli_args.adviser is not None: config.ACTIVE_ADVISER_PROFILE = cli_args.adviser
 if cli_args.analyst is not None: config.ACTIVE_ANALYST_PROFILE = cli_args.analyst
+if cli_args.architect is not None: config.ACTIVE_ARCHITECT_PROFILE = cli_args.architect
 
 # Capture Prompt (from -p flag OR piped STDIN)
 cli_prompt = cli_args.prompt
@@ -77,6 +79,7 @@ COLOR_DARK_GREEN = '\033[32m'
 COLOR_ORANGE = '\033[38;5;208m' # ANSI 256-color orange
 COLOR_DIM = '\033[2m'   # Dim text for "thinking"
 COLOR_RESET = '\033[0m'
+COLOR_CYAN = '\033[96m'
 
 # --- LLM setups ---
 tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -100,7 +103,7 @@ is_resuming = os.path.exists(SESSION_DIR)
 
 # Build the isolated folder structure
 os.makedirs(f"{SESSION_DIR}/logs", exist_ok=True)
-os.makedirs(f"{SESSION_DIR}/forged_tools", exist_ok=True)
+os.makedirs(f"{SESSION_DIR}/plugins", exist_ok=True)
 os.makedirs(f"{SESSION_DIR}/histories", exist_ok=True) 
 os.makedirs(f"{SESSION_DIR}/memories", exist_ok=True)
 os.makedirs(f"{SESSION_DIR}/state", exist_ok=True)
@@ -117,14 +120,48 @@ os.makedirs(config.HOST_INPUT_DIR, exist_ok=True)
 LOG_FILE = f"{SESSION_DIR}/logs/chat_log_{timestamp}.txt"
 CURRENT_HISTORY_FILE = f"{SESSION_DIR}/state/current_history.json"
 
+def build_skills_menu():
+    """Scans the sandbox workspace for SKILL.md files and builds the menu."""
+    skills_dir = os.path.join(SESSION_DIR, "skills")
+    if not os.path.exists(skills_dir):
+        return "AVAILABLE SKILLS MENU:\n- None currently installed. Use commission_architect to build some."
+
+    menu_lines = ["AVAILABLE SKILLS MENU (Use `load_skill` to read full instructions):"]
+    for item in sorted(os.listdir(skills_dir)):
+        skill_path = os.path.join(skills_dir, item, "SKILL.md")
+        if os.path.exists(skill_path):
+            try:
+                with open(skill_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                desc_match = re.search(r'description:\s*(.+)', content)
+                description = desc_match.group(1).strip() if desc_match else "No description provided."
+                menu_lines.append(f"- {item}: {description}")
+            except Exception:
+                pass
+                
+    if len(menu_lines) == 1:
+        return "AVAILABLE SKILLS MENU:\n- None currently installed. Use commission_architect to build some."
+    return "\n".join(menu_lines)
+
+
 # --- STATE MANAGEMENT HELPERS ---
 def load_history():
     """Loads the true state of the brain from the hard drive."""
+    skills_menu = build_skills_menu()
+    system_prompt = f"{config.SYSTEM_PROMPTS['brain']}\n\n{skills_menu}"
+    
     if not os.path.exists(CURRENT_HISTORY_FILE):
-        init_state = [{"role": "system", "content": config.PROMPTS["overseer_system"]}]
+        init_state = [{"role": "system", "content": system_prompt}]
         save_history(init_state)
         return init_state
-    with open(CURRENT_HISTORY_FILE, "r") as f: return json.load(f)
+        
+    with open(CURRENT_HISTORY_FILE, "r") as f: 
+        messages = json.load(f)
+        
+    if messages and messages[0]["role"] == "system":
+        messages[0]["content"] = system_prompt
+        
+    return messages
 
 def save_history(messages):
     """Saves the active history. Strips thinking tokens using atomic writes."""
@@ -194,7 +231,7 @@ def cleanup_container():
     """Guarantees the container is killed when the python script exits."""
     if active_container_name:
         if config.VERBOSITY_MODE != "silent":
-            print(f"\n\033[91m[SYSTEM] Tearing down container {active_container_name}...\033[0m")
+            print(f"\n{COLOR_CYAN}[SYSTEM] Tearing down container {active_container_name}...{COLOR_RESET}")
         subprocess.run(
             f"podman rm -f {active_container_name}", 
             shell=True, 
@@ -212,6 +249,8 @@ async def run_chat():
         f"Coder:      {config.LLM_PROFILES[config.ACTIVE_CODER_PROFILE]['name']}\n"
         f"Summarizer: {config.LLM_PROFILES[config.ACTIVE_SUMMARIZER_PROFILE]['name']}\n"
         f"Adviser:    {config.LLM_PROFILES[config.ACTIVE_ADVISER_PROFILE]['name']}\n"
+        f"Analyst:    {config.LLM_PROFILES[config.ACTIVE_ANALYST_PROFILE]['name']}\n"
+        f"Architect:  {config.LLM_PROFILES[config.ACTIVE_ARCHITECT_PROFILE]['name']}\n"
         f"Log saved to: {LOG_FILE}"
     )
     log_event("SYSTEM", banner)
@@ -227,13 +266,16 @@ async def run_chat():
     else:
         log_event("SYSTEM", f"Started new workspace: '{active_session}'.\n{help_text}")
         
+    skills_menu = build_skills_menu()
+    system_prompt = f"{config.SYSTEM_PROMPTS['brain']}\n\n{skills_menu}"
+    
     # THE SELF-HEALING CONNECTION LOOP
     while not quit_app:
         global active_container_name
         active_container_name = f"forge_sandbox_{active_session}_{os.getpid()}"
         # Clear stale Podman WSL state before every single boot/reboot ---
         if config.VERBOSITY_MODE != "silent":
-            print(f"{COLOR_DIM}Sweeping stale Podman state...{COLOR_RESET}")
+            print(f"{COLOR_CYAN}[SYSTEM] Sweeping stale Podman state...{COLOR_RESET}")
 
         subprocess.run(
             f"podman rm -f --ignore {active_container_name}",
@@ -249,11 +291,11 @@ async def run_chat():
             # Start with the base command
             god_tools_cmd = "pixi run --locked --manifest-path /app/pixi.toml -q python /app/god_tools.py"
             
-            # Append any CLI profile overrides that were provided
             if cli_args.coder is not None: god_tools_cmd += f" --coder {cli_args.coder}"
             if cli_args.summarizer is not None: god_tools_cmd += f" --summarizer {cli_args.summarizer}"
             if cli_args.adviser is not None: god_tools_cmd += f" --adviser {cli_args.adviser}"
             if cli_args.analyst is not None: god_tools_cmd += f" --analyst {cli_args.analyst}"
+            if cli_args.architect is not None: god_tools_cmd += f" --architect {cli_args.architect}"
                     
             server_params = StdioServerParameters(
                 command="podman",
@@ -579,8 +621,8 @@ async def run_chat():
                                     log_event("TOOL CALL", f"Requesting: {name}\nArgs: {json.dumps(args, indent=2)}", hide_console=hide_args)
 
                                     if config.VERBOSITY_MODE != "silent":                                    
-                                        if name == "forge_and_register_tool":
-                                            print(f"\n{COLOR_ORANGE}▶ Passing task to Coder... Awaiting response...{COLOR_RESET}")
+                                        if name == "forge_and_register_plugin":
+                                            print(f"\n{COLOR_ORANGE}▶ Routing to Coder for plugin forging...{COLOR_RESET}")
                                         elif name == "compress_and_store_context":
                                             print(f"\n{COLOR_ORANGE}▶ Triggering Memory Manager Pipeline... Awaiting response...{COLOR_RESET}")
                                         elif name == "consult_adviser":
@@ -627,7 +669,7 @@ async def run_chat():
                                         output += f"\n\n{intervention_msg}"
                                         
                                         if config.VERBOSITY_MODE != "silent":
-                                            print(f"\n\033[91m[SYSTEM: AI is stuck looping on {name}. Injecting forced intervention!]\033[0m")
+                                            print(f"\n{COLOR_RED}[SYSTEM: AI is stuck looping on {name}. Injecting forced intervention!]{COLOR_RESET}")
                                         
                                         log_event("SYSTEM", f"Forced intervention triggered for tool: {name}")
 
@@ -667,7 +709,7 @@ async def run_chat():
                                         with open(LOG_FILE, "a", encoding="utf-8") as f:
                                             f.write(log_text)
 
-                                    out_color = COLOR_ORANGE if name in ["forge_and_register_tool", "compress_and_store_context"] else COLOR_DARK_GREEN
+                                    out_color = COLOR_ORANGE if name in ["forge_and_register_plugin", "compress_and_store_context"] else COLOR_DARK_GREEN
                                     
                                     # Hide massive output dumps from console if in minimal/standard
                                     hide_output = config.VERBOSITY_MODE in ["minimal", "standard"]
@@ -675,7 +717,6 @@ async def run_chat():
                                     
                                     if hide_output and config.VERBOSITY_MODE != "silent":
                                         print(f"{COLOR_DARK_GREEN}✓ Tool '{name}' completed ({time.time() - start:.2f}s).{COLOR_RESET}")
-
                                         
                                     if name == "compress_and_store_context":
                                         print(f"\n{COLOR_ORANGE}[SYSTEM] Reloading compressed state from disk...{COLOR_RESET}")
@@ -775,4 +816,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(run_chat())
     except KeyboardInterrupt:
-        print(f"\n\033[91m[SYSTEM] Forced shutdown. Goodbye!\033[0m")
+        print(f"\n{COLOR_RED}[SYSTEM] Forced shutdown. Goodbye!{COLOR_RESET}")

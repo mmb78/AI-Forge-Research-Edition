@@ -40,6 +40,7 @@ parser.add_argument("--coder", type=int, help="Coder LLM profile index")
 parser.add_argument("--summarizer", type=int, help="Summarizer LLM profile index")
 parser.add_argument("--adviser", type=int, help="Adviser LLM profile index")
 parser.add_argument("--analyst", type=int, help="Analyst LLM profile index")
+parser.add_argument("--architect", type=int, help="Architect LLM profile index")
 args, unknown = parser.parse_known_args() # Ignore other arguments Podman might pass
 # --- HIDE ARGUMENTS FROM FASTMCP ---
 sys.argv = [sys.argv[0]] + unknown
@@ -49,6 +50,7 @@ if args.coder is not None: config.ACTIVE_CODER_PROFILE = args.coder
 if args.summarizer is not None: config.ACTIVE_SUMMARIZER_PROFILE = args.summarizer
 if args.adviser is not None: config.ACTIVE_ADVISER_PROFILE = args.adviser
 if args.analyst is not None: config.ACTIVE_ANALYST_PROFILE = args.analyst
+if args.architect is not None: config.ACTIVE_ARCHITECT_PROFILE = args.architect
 
 ## Start the MCP server
 mcp = FastMCP("TheForge")
@@ -70,7 +72,8 @@ logging.getLogger().handlers = [h for h in logging.getLogger().handlers if isins
 WORKSPACE_DIR = "/app/workspace"
 STATE_DIR = os.path.join(WORKSPACE_DIR, "state")
 SANDBOX_DIR = os.path.join(WORKSPACE_DIR, "sandbox")
-FORGED_TOOLS_DIR = os.path.join(WORKSPACE_DIR, "forged_tools")
+PLUGINS_DIR = os.path.join(WORKSPACE_DIR, "plugins")
+_LOADED_SKILLS = set()
 MEMORIES_DIR = os.path.join(WORKSPACE_DIR, "memories")
 HISTORIES_DIR = os.path.join(WORKSPACE_DIR, "histories")
 TOOL_REGISTRY_FILE = os.path.join(STATE_DIR, "tool_registry.json")
@@ -448,11 +451,11 @@ def write_file(filepath: str, content: str) -> str:
     If the file already exists, it automatically creates a timestamped backup before overwriting.
     Use this instead of bash 'echo' or 'cat' to write markdown, or text files safely.
     You can only write to 'outputs' or 'sandbox' directories.
-    IMPORTANT: For Python code, use forge_and_register_tool!
+    IMPORTANT: For Python code, use forge_and_register_plugin!
     """
 
     if filepath.strip().endswith(".py"):
-        return "SYSTEM ERROR: You are strictly FORBIDDEN from using write_file to create Python (.py) scripts. You MUST use 'forge_and_register_tool' so the Coder LLM can write it properly."
+        return "SYSTEM ERROR: You are strictly FORBIDDEN from using write_file to create Python (.py) scripts. You MUST use 'forge_and_register_plugin' so the Coder LLM can write it properly."
 
     # 1. Resolve the absolute path
     resolved_path = os.path.realpath(filepath)
@@ -796,30 +799,30 @@ async def compress_and_store_context() -> str:
 
 
 @mcp.tool()
-async def forge_and_register_tool(category: str, category_description: str, tool_name: str, tool_description: str, objective: str) -> str:
+async def forge_and_register_plugin(category: str, category_description: str, plugin_name: str, plugin_description: str, objective: str) -> str:
     """Delegates writing a Python script to the Coder LLM, and registers it with rich metadata.
     'category_description' explains what the category is for (updates existing descriptions).
-    'tool_description' should explain what the tool does and what arguments/parameters it expects.
+    'plugin_description' should explain what the plugin does and what arguments/parameters it expects.
     'objective' is the raw instruction sent to the coder.
     """
 
     # --- SECURE PATH SANITIZATION ---
-    safe_name = os.path.basename(tool_name)
+    safe_name = os.path.basename(plugin_name)
     if safe_name.endswith('.py'):
         safe_name = safe_name[:-3]
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', safe_name)
     if not safe_name:
-        safe_name = "default_tool_name"
+        safe_name = "default_plugin_name"
 
     filename = f"{safe_name}.py"
-    file_path = os.path.join(FORGED_TOOLS_DIR, filename)
+    file_path = os.path.join(PLUGINS_DIR, filename)
     
     messages = [
         {"role": "system", "content": config.PROMPTS["coder_system"]},
         {"role": "user", "content": config.PROMPTS["coder_user"].format(objective=objective)}
     ]
     
-    for attempt in range(config.MAX_FORGE_RETRIES):
+    for attempt in range(config.MAX_PLUGIN_RETRIES):
         try:
             api_args = coder_profile["api_params"].copy()
             api_args["model"] = coder_profile["model"]
@@ -899,7 +902,7 @@ async def forge_and_register_tool(category: str, category_description: str, tool
             
             # Non-blocking compile check
             check = await asyncio.to_thread(
-                subprocess.run, [sys.executable, "-m", "py_compile", filename], cwd=FORGED_TOOLS_DIR, capture_output=True, text=True
+                subprocess.run, [sys.executable, "-m", "py_compile", filename], cwd=PLUGINS_DIR, capture_output=True, text=True
             )
             
             if check.returncode == 0:
@@ -911,18 +914,18 @@ async def forge_and_register_tool(category: str, category_description: str, tool
                 registry[category]["category_description"] = category_description
                 
                 # Save the rich tool data pointing to the new folder
-                registry[category]["tools"][tool_name] = {
-                    "path": f"/app/workspace/forged_tools/{filename}",
-                    "description": tool_description,
+                registry[category]["tools"][plugin_name] = {
+                    "path": f"/app/workspace/plugins/{filename}",
+                    "description": plugin_description,
                     "usage_objective": objective
                 }
                 save_json(TOOL_REGISTRY_FILE, registry)
                 
-                report = f"SUCCESS (Attempt {attempt+1}): Tool '{tool_name}' forged in '{category}'.\n"
+                report = f"SUCCESS (Attempt {attempt+1}): Plugin '{plugin_name}' forged in '{category}'.\n"
                 report += f"{token_report}\n"
                 report += deps_report
                 
-                report += f"Run via: execute_bash('pixi run python /app/workspace/forged_tools/{filename}')\n\n"
+                report += f"Run via: execute_bash('pixi run python /app/workspace/plugins/{filename}')\n\n"
                 
                 report += f"\n<___CODER_CODE___>\n{code}\n</___CODER_CODE___>"
                 
@@ -942,7 +945,7 @@ async def forge_and_register_tool(category: str, category_description: str, tool
             error_trace = traceback.format_exc()
             return f"Fatal API Error during forging attempt {attempt+1}.\nError: {str(e)}\n\nDetailed Traceback:\n{error_trace}"
             
-    return f"FAILED: Coder LLM could not produce valid code after {config.MAX_FORGE_RETRIES} attempts."
+    return f"FAILED: Coder LLM could not produce valid code after {config.MAX_PLUGIN_RETRIES} attempts."
 
 
 db_tool_desc = f"""Executes a SQL query against a specified SQLite database.
@@ -968,7 +971,7 @@ async def query_sqlite_db(db_path: str, query: str, parameters: list = None, sea
     try:
         # --- Handle Search Embedding Injection ---
         if search_text_to_embed:
-            response = await universal_client.embeddings.create(
+            response = await embedding_client.embeddings.create(
                 model=config.EMBEDDING_CONFIG["model"],
                 input=search_text_to_embed
             )
@@ -981,11 +984,14 @@ async def query_sqlite_db(db_path: str, query: str, parameters: list = None, sea
                 return "SYSTEM ERROR: You cannot use 'search_text_to_embed' simultaneously with bulk (list of lists) parameters."
             parameters.append(vector_blob)
         
-        upper_query = query.strip().upper()
-        if upper_query.startswith("DROP TABLE") or upper_query.startswith("DELETE FROM"):
+        if re.search(r"\b(DROP\s+TABLE|DELETE\s+FROM)\b", query, re.IGNORECASE):
             return "SYSTEM ERROR: 'DROP TABLE' and 'DELETE FROM' are disabled for safety. To 'delete' data, rename the table using ALTER."
         
         # --- Database Execution ---
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+            
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.enable_load_extension(True)
@@ -1088,7 +1094,7 @@ async def batch_generate_embeddings(db_path: str, vec_table: str, source_query: 
             texts_to_embed.append(str(row[1]))
             
         # 2. Generate Embeddings via the API in one massive batch
-        response = await universal_client.embeddings.create(
+        response = await embedding_client.embeddings.create(
             model=config.EMBEDDING_CONFIG["model"],
             input=texts_to_embed
         )
@@ -1377,5 +1383,70 @@ async def analyze_files(filepaths: list[str], instruction: str) -> str:
     except Exception as e:
         return f"Analyst failed to process files. Error: {str(e)}"
         
+@mcp.tool()
+def load_skill(skill_name: str) -> str:
+    """Loads the full instructional blueprint for a given skill.
+    Use this immediately when your current task matches a skill in your system prompt."""
+    global _LOADED_SKILLS
+    if skill_name in _LOADED_SKILLS:
+        return f"[SYSTEM ERROR: You already loaded the '{skill_name}' skill earlier in this session. Read your previous messages to find the instructions.]"
+        
+    skill_path = f"/app/workspace/skills/{skill_name}/SKILL.md"
+    if not os.path.exists(skill_path):
+        return f"[SYSTEM ERROR: Skill '{skill_name}' not found at {skill_path}.]"
+        
+    with open(skill_path, "r", encoding="utf-8") as f:
+        content = f.read()
+        
+    _LOADED_SKILLS.add(skill_name)
+    return f"--- SKILL ACTIVATED: {skill_name} ---\n{content}\n\n[SYSTEM: You must now strictly follow these instructions.]"
+
+
+@mcp.tool()
+async def commission_architect(skill_name: str, objective: str, brain_notes: str) -> str:
+    """
+    Use this immediately after solving a complex problem to permanently document it.
+    Passes raw notes to the Architect agent, who formats and saves it as a new Skill.
+    """
+    if config.VERBOSITY_MODE != "silent":
+        print(f"\n\033[38;5;208m▶ [SYSTEM] Waking up the Architect to draft skill: {skill_name}...\033[0m")
+        
+    architect_user = f"Skill Name: {skill_name}\nObjective: {objective}\nBrain's Notes:\n{brain_notes}"
+    client = AsyncOpenAI(
+        base_url=config.LLM_PROFILES[config.ACTIVE_ARCHITECT_PROFILE]["base_url"],
+        api_key=config.LLM_PROFILES[config.ACTIVE_ARCHITECT_PROFILE]["api_key"]
+    )
+    
+    try:
+        response = await client.chat.completions.create(
+            model=config.LLM_PROFILES[config.ACTIVE_ARCHITECT_PROFILE]["model"],
+            messages=[
+                {"role": "system", "content": config.SYSTEM_PROMPTS["architect"]},
+                {"role": "user", "content": architect_user}
+            ],
+            **config.LLM_PROFILES[config.ACTIVE_ARCHITECT_PROFILE].get("api_params", {})
+        )
+        
+        formatted_skill_md = response.choices[0].message.content.strip()
+        if formatted_skill_md.startswith("```markdown"):
+            formatted_skill_md = formatted_skill_md[11:]
+        if formatted_skill_md.startswith("```"):
+            formatted_skill_md = formatted_skill_md[3:]
+        if formatted_skill_md.endswith("```"):
+            formatted_skill_md = formatted_skill_md[:-3]
+        formatted_skill_md = formatted_skill_md.strip()
+
+        skill_dir = f"/app/workspace/skills/{skill_name}"
+        os.makedirs(skill_dir, exist_ok=True)
+        
+        skill_path = os.path.join(skill_dir, "SKILL.md")
+        with open(skill_path, "w", encoding="utf-8") as f:
+            f.write(formatted_skill_md)
+            
+        return f"[SUCCESS] The Architect has drafted and saved '{skill_name}' to {skill_path}. It will be injected into your menu on the next system boot."
+    except Exception as e:
+        return f"[ARCHITECT ERROR] Failed to generate skill: {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run()

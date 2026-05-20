@@ -64,12 +64,12 @@ LLMs sometimes make syntax errors. Instead of burdening the Brain's context wind
 
 ### 3. Rich Hierarchical Discovery (The Registries)
 To prevent overwhelming the AI with hundreds of tools and memories, knowledge is split into compact JSON indexes and detailed physical files:
-* **Tool Registry:** Forged tools are categorized in `tool_registry.json`. The Brain navigates this in two steps: checking high-level categories, then diving into specific category descriptions to learn how to use its tools.
+* **Tool Registry:** Plugins are categorized in `tool_registry.json`. The Brain navigates this in two steps: checking high-level categories, then diving into specific category descriptions to learn how to use its tools.
 * **Memory Registry:** Long-term facts and summaries are indexed in `memory_registry.json` with short descriptions and timestamps. The exhaustive details are saved as individual Markdown files (`.md`) in the `memories/` folder. The Brain can browse the lightweight index and only spend tokens to read the full file when explicitly needed.
 
 ### 4. Persistent Sessions & Isolated Environments
 Workspaces are strictly isolated. The system dynamically generates unique `Session_ID` folders. 
-* **State-Driven Restart:** The framework operates entirely on state files, not temporary RAM. When you resume a session, the Brain instantly re-loads its `current_history.json` and perfectly remembers exactly where it left off, alongside all its forged tools, stored memories, and master plans. 
+* **State-Driven Restart:** The framework operates entirely on state files, not temporary RAM. When you resume a session, the Brain instantly re-loads its `current_history.json` and perfectly remembers exactly where it left off, alongside all its plugins, stored memories, and master plans. 
 * **Layered Micro-Environments (Base + Delta):** The heavy, complex dependencies (like C++ libraries and Chromium) are locked safely in the container's base Pixi image. When the AI installs a new third-party library for a specific tool, it uses a background `pip --target` injection. This places the tiny Python files directly into a `custom_packages` folder inside that specific session's mapped workspace, keeping your hard drive completely free of 2GB redundant bloat while retaining perfect session persistence.
 * **Bioconda Injection:** Every new workspace is automatically configured to pull from the `bioconda` conda channel, giving the AI immediate access to thousands of pre-compiled bioinformatics tools.
 
@@ -130,7 +130,7 @@ The Overseer natively decouples **Format** (how it looks) from **Verbosity** (ho
   * `/sandbox`: The scratchpad where the AI actually executes bash commands and tests tools.
   * `/outputs`: The dedicated folder where the AI saves finished artifacts and generated files.
   * `/state`: Contains the critical JSON registries, the master plan, adviser reports, and the live `current_history.json` file.
-  * `/forged_tools`: Where the generated Python scripts live.
+  * `/plugins`: Where the generated Python scripts live.
   * `/memories`: Where the detailed Markdown files live.
   * `/archive`: The dedicated "Soft-Delete" trash bin.
 * **Zero-Trust Architecture:** The container contains absolutely NO sensitive data, API keys, or `.env` files. The AI uses hardcoded dummy keys (e.g., `sk-sandbox-fake-key`) and routes all requests to a local `host.containers.internal` gateway. Authentication and routing are securely handled by a LiteLLM proxy running safely on the Windows/WSL host, making credential theft mathematically impossible.
@@ -320,7 +320,7 @@ You can override configurations, pipe in files, and trigger headless background 
 ### Session Management (Config Fallback)
 If you don't use the `-s` flag, the framework falls back to your `config.py`. **Always use strings for Session IDs**.
 * `SESSION_ID = None` -> Starts a brand new, uniquely timestamped workspace.
-* `SESSION_ID = "20260429180500"` -> Restores that specific session, loading all previously forged tools and state memory.
+* `SESSION_ID = "20260429180500"` -> Restores that specific session, loading all plugins and state memory.
 
 ### Example Interaction Flow
 
@@ -330,10 +330,10 @@ Once the chat starts, try issuing a complex command:
 
 **What happens behind the scenes:**
 1. The **Brain** checks `view_tool_registry` and realizes the tool doesn't exist.
-2. The Brain calls `forge_and_register_tool` via the secure Podman MCP connection.
+2. The Brain calls `forge_and_register_plugin` via the secure Podman MCP connection.
 3. The **MCP Server** pings the **Coder LLM** through the `host.containers.internal` gateway to write `fibonacci.py`.
 4. The system sanitizes the filename and runs a syntax check. If it passes, it updates `tool_registry.json`.
-5. The Brain reads the usage instructions, then uses `execute_bash` to run it: `python /app/workspace/forged_tools/fibonacci.py`.
+5. The Brain reads the usage instructions, then uses `execute_bash` to run it: `python /app/workspace/plugins/fibonacci.py`.
 6. The result is streamed back to your color-coded console.
 
 ### Context Compression & Observability
